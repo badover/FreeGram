@@ -64,6 +64,12 @@ function showError(msg) {
   }, 10);
 }
 
+function safeText(text) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.textContent;
+}
+
 
 socket.on("roomError", (msg) => {
   showError(msg);
@@ -75,8 +81,8 @@ socket.on("roomJoined", (data) => {
   currentNickname = data.nickname;
   
 
-  currentRoomSpan.textContent = `ROOM: ${currentRoom.toUpperCase()}`;
-  currentUserSpan.textContent = `USER: ${currentNickname.toUpperCase()}`;
+  currentRoomSpan.textContent = `ROOM: ${safeText(currentRoom).toUpperCase()}`;
+  currentUserSpan.textContent = `USER: ${safeText(currentNickname).toUpperCase()}`;
   userCountSpan.textContent = data.userCount || 1; 
   
 
@@ -133,6 +139,7 @@ socket.on("chatMessage", (data) => {
 });
 
 
+
 function addMessage(data) {
   const messageDiv = document.createElement("div");
   
@@ -171,12 +178,16 @@ function escapeHtml(text) {
 function addSystemMessage(text) {
   const systemDiv = document.createElement("div");
   systemDiv.className = "message-system";
-  systemDiv.innerHTML = `
-    <div class="system-text">${text}</div>
-  `;
+
+  const inner = document.createElement("div");
+  inner.className = "system-text";
+  inner.textContent = text;
+
+  systemDiv.appendChild(inner);
   messagesList.appendChild(systemDiv);
   scrollToBottom();
 }
+
 
 
 function scrollToBottom() {

@@ -1,3 +1,22 @@
+const crypto = require("crypto");
+
+const MAX_MSG_LEN = 500;
+const MAX_NICK_LEN = 20;
+const MAX_ROOM_LEN = 30;
+const MAX_PASSWORD_LEN = 64;
+
+function sanitizeString(str, maxLen) {
+  if (typeof str !== "string") return null;
+  str = str.trim();
+  if (!str || str.length > maxLen) return null;
+  return str.replace(/[<>]/g, "");
+}
+
+function hashPassword(password) {
+  return crypto.createHash("sha256").update(password).digest("hex");
+}
+
+
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -12,98 +31,111 @@ app.use(express.static("public"));
 const rooms = {}; 
 
 io.on("connection", (socket) => {
+  socket.lastMsg = 0;
   console.log("User connected:", socket.id);
 
  
   socket.on("createRoom", ({ room, password, nickname }) => {
+    room = sanitizeString(room, MAX_ROOM_LEN);
+    nickname = sanitizeString(nickname || "Anonymous", MAX_NICK_LEN);
+
+    if (!room || !password || password.length > MAX_PASSWORD_LEN) {
+      socket.emit("roomError", "Invalid data");
+      return;
+    }
+
     if (rooms[room]) {
       socket.emit("roomError", "Room already exists");
       return;
     }
 
     rooms[room] = {
-      password,
-      users: {},
-      createdAt: new Date().toISOString()
+      password: hashPassword(password),
+      users: Object.create(null),
+      createdAt: Date.now()
     };
 
     rooms[room].users[socket.id] = {
-      nickname: nickname || "Anonymous",
-      joinedAt: new Date().toISOString()
+      nickname,
+      joinedAt: Date.now()
     };
-    
+
     socket.join(room);
     socket.room = room;
-    socket.nickname = nickname || "Anonymous";
+    socket.nickname = nickname;
 
-    socket.emit("roomJoined", { 
-      room, 
-      nickname: nickname || "Anonymous",
-      userCount: Object.keys(rooms[room].users).length 
+    socket.emit("roomJoined", {
+      room,
+      nickname,
+      userCount: 1
     });
-    
-    
-    console.log(`Room created: ${room}`);
   });
 
-  
+
   socket.on("joinRoom", ({ room, password, nickname }) => {
-    if (!rooms[room]) {
+    room = sanitizeString(room, MAX_ROOM_LEN);
+    nickname = sanitizeString(nickname || "Anonymous", MAX_NICK_LEN);
+
+    if (!room || !password) {
+      socket.emit("roomError", "Invalid data");
+      return;
+    }
+
+    const roomData = rooms[room];
+    if (!roomData) {
       socket.emit("roomError", "Room doesn't exist");
       return;
     }
 
-    if (rooms[room].password !== password) {
+    if (roomData.password !== hashPassword(password)) {
       socket.emit("roomError", "Incorrect password");
       return;
     }
 
-    rooms[room].users[socket.id] = {
-      nickname: nickname || "Anonymous",
-      joinedAt: new Date().toISOString()
+    roomData.users[socket.id] = {
+      nickname,
+      joinedAt: Date.now()
     };
-    
+
     socket.join(room);
     socket.room = room;
-    socket.nickname = nickname || "Anonymous";
+    socket.nickname = nickname;
 
-    socket.emit("roomJoined", { 
-      room, 
-      nickname: nickname || "Anonymous",
-      userCount: Object.keys(rooms[room].users).length 
+    socket.emit("roomJoined", {
+      room,
+      nickname,
+      userCount: Object.keys(roomData.users).length
     });
-    
-    
+
     io.to(room).emit("updateUserCount", {
-      count: Object.keys(rooms[room].users).length
+      count: Object.keys(roomData.users).length
     });
-    
-    
-    console.log(`User joined ${room}`);
   });
 
-  
   socket.on("chatMessage", (msg) => {
+    const now = Date.now();
+    if (now - socket.lastMsg < 500) return;
+    socket.lastMsg = now;
+
     if (!socket.room || !rooms[socket.room]) return;
+    if (typeof msg !== "string") return;
+    
+    msg = msg.trim();
+    if (!msg || msg.length > MAX_MSG_LEN) return;
+
+    msg = msg.replace(/[<>]/g, "");
 
     const messageData = {
       msg,
       nickname: socket.nickname,
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       self: false
     };
 
-    
     socket.to(socket.room).emit("chatMessage", messageData);
-    
-    
-    socket.emit("chatMessage", {
-      ...messageData,
-      self: true
-    });
-    
-   
+    socket.emit("chatMessage", { ...messageData, self: true });
   });
+
 
   
   socket.on("disconnect", () => {
@@ -138,4 +170,6 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(3000, () => console.log("Server running on http://localhost:3000"));
+server.listen(3000, "127.0.0.1", () => {
+  console.log("Server running on http://127.0.0.1:3000");
+});
