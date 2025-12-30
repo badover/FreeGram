@@ -43,7 +43,6 @@ Contributions are welcome.
 You can help by:
 - Reporting issues  
 - Suggesting improvements  
-- Submitting pull requests  
 
 ---
 
