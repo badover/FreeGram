@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Free Gram</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700&family=Share+Tech+Mono&display=swap');
+  </style>
+</head>
+
+<body>
+
+  <div id="login-screen">
+    <div class="scanlines"></div>
+    <div class="glitch-overlay"></div>
+    
+    <div class="login-box">
+      <div class="terminal-header">
+        <div class="terminal-lights">
+          <span class="light red"></span>
+          <span class="light yellow"></span>
+          <span class="light green"></span>
+        </div>
+        <h1>FREE GRAM V 0.1</h1>
+        <div class="header-stats">
+          <span>MADE BY: <span class="neon-blue">BADOVER</span></span>
+          <span>SECURITY: <span class="neon-yellow">ENCRYPTED</span></span>
+        </div>
+      </div>
+
+      <div class="login-form">
+        <div class="input-group">
+          <label class="neon-label">NICKNAME:</label>
+          <input id="nickname" placeholder="Enter nickname" class="cyber-input">
+        </div>
+        
+        <div class="input-group">
+          <label class="neon-label">ROOM NAME:</label>
+          <input id="room" placeholder="Enter room name" class="cyber-input">
+        </div>
+        
+        <div class="input-group">
+          <label class="neon-label">ENCRYPTION KEY:</label>
+          <input id="password" type="password" placeholder="●●●●●●●●" class="cyber-input">
+        </div>
+
+        <div class="button-group">
+          <button id="createRoom" class="cyber-btn cyber-btn-primary">
+            <span class="btn-text">CREATE ROOM</span>
+            <span class="btn-glow"></span>
+          </button>
+          <button id="joinRoom" class="cyber-btn cyber-btn-secondary">
+            <span class="btn-text">JOIN EXISTING</span>
+            <span class="btn-glow"></span>
+          </button>
+        </div>
+
+        <div id="loginError" class="error-display"></div>
+        
+        <div class="login-footer">
+          <p>SERVER DOES NOT LOG YOUR MESSAGES</p>
+          <p>FULL ANONYMITY, NO DATABASES, NO METADATA</p>
+        </div>
+      </div>
+    </div>
+    
+    <div class="cyber-grid"></div>
+  </div>
+
+
+  <div id="chat-screen">
+    <div class="scanlines"></div>
+    <div class="glitch-overlay"></div>
+    
+    <div class="chat-container">
+      <div class="chat-header">
+        <div class="header-left">
+          <div class="terminal-lights small">
+            <span class="light red active"></span>
+            <span class="light yellow active"></span>
+            <span class="light green active"></span>
+          </div>
+          <h2>MADE BY <href></href>GITHUB.COM/BADOVER</h2>
+        </div>
+        <div class="header-right">
+          <span class="room-display" id="currentRoom">ROOM: OFFLINE</span>
+          <span class="user-display" id="currentUser">USER: ANONYMOUS</span>
+        </div>
+      </div>
+      
+  
+      <div class="messages-container">
+        <div id="messages" class="messages"></div>
+      </div>
+      
+      
+      <div class="input-panel">
+        <div class="input-wrapper">
+          <span class="input-prompt">></span>
+          <input id="chatInput" placeholder="TYPE MESSAGE..." class="message-input">
+          <button id="sendBtn" class="send-btn">
+            <span class="send-text">SEND REPLY</span>
+            <div class="send-glow"></div>
+          </button>
+        </div>
+        <div class="status-bar">
+          <span>CONNECTION: <span class="neon-green">SECURE</span></span>
+          <!-- <span>ENCRYPTION: <span class="neon-blue">ACTIVE</span></span> -->
+          <span>USERS: <span id="userCount" class="neon-yellow">1</span></span>
+        </div>
+      </div>
+    </div>
+    
+    <div class="cyber-grid"></div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="client.js"></script>
+</body>
+</html>
