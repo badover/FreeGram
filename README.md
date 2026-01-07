@@ -1,5 +1,6 @@
-
 ## FreeGram - https://fgram.net
+<img width="1024" height="1024" alt="fgramnet" src="https://github.com/user-attachments/assets/b547ea9c-afe6-46f3-b145-f359c450c7df" />
+
 
 **FreeGram** is an open-source web messenger designed for anonymous communication without registration, tracking, or personal data collection.
 
@@ -14,6 +15,7 @@ FreeGram allows users to create temporary chat rooms using any login and passwor
 
 Room credentials can be securely shared with friends.  
 Each room is an isolated and private space where participants can exchange messages in real time.
+In rooms you can sned messages, videos, photos. In the future you can make videocalls, send voicemessages and other type of files.
 
 Rooms are ephemeral and exist only while they are actively used.
 
@@ -32,7 +34,7 @@ Rooms are ephemeral and exist only while they are actively used.
 
 ## Vision Statement
 
-Our team belive that every perosn has right for privacy. Many messengers nowadays don't respect this right: they collect a lot information about you, create your digigtal "passport" and don't care about your safety inside. The idea for this messenger came to me when I saw how the well-known messenger Telegram works: not really caring about the confidentiality of users and their right to privacy. I want to provide a place where anybody can go and talk quietly, without fear that one day a messenger will give out their logs or collect data about them and show personalized ads.
+Our team believe that every person has right for privacy. Many messengers nowadays don't respect this right: they collect a lot information about you, create your digigtal "passport" and don't care about your safety inside. The idea for this messenger came to me when I saw how the well-known messenger Telegram works: not really caring about the confidentiality of users and their right to privacy. I want to provide a place where anybody can go and talk quietly, without fear that one day a messenger will give out their logs or collect data about them and show personalized ads. No to censorship!
 
 ---
 
@@ -48,7 +50,7 @@ You can help by:
 
 ## Disclaimer
 
-This project is provided **as is**, without any warranties.  
+This project is provided "**as is**", without any warranties.  
 The authors are not responsible for misuse of the software.
 
 ---
