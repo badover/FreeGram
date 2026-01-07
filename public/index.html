@@ -4,8 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Free Gram</title>
-  <link rel="icon" href="/favicon.ico" type="image/x-icon">
+  <link rel="icon" href="favicon.ico" type="image/x-icon">
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700&family=Share+Tech+Mono&display=swap');
   </style>
@@ -27,27 +28,25 @@
         <h1>FREE GRAM</h1>
         <div class="header-stats">
           <span>MADE BY: <span class="neon-yellow">BADOVER</span></span>
-          <!-- <span>SECURITY: <span class="neon-yellow">ENCRYPTED</span></span> -->
         </div>
       </div>
 
       <div class="login-form">
         <div class="asdasd">
-  <div class="input-group">
-          <label class="neon-label">NICKNAME:</label>
-          <input id="nickname" placeholder="Enter nickname" class="cyber-input">
-        </div>
-        
-        <div class="input-group">
-          <label class="neon-label">ROOM NAME:</label>
-          <input id="room" placeholder="Enter room name" class="cyber-input">
-        </div>
-        
-        <div class="input-group">
-          <label class="neon-label">ENCRYPTION KEY:</label>
-          <input id="password" type="password" placeholder="●●●●●●●●" class="cyber-input">
-        </div>
-
+          <div class="input-group">
+            <label class="neon-label">NICKNAME:</label>
+            <input id="nickname" placeholder="Enter nickname" class="cyber-input">
+          </div>
+          
+          <div class="input-group">
+            <label class="neon-label">ROOM NAME:</label>
+            <input id="room" placeholder="Enter room name" class="cyber-input">
+          </div>
+          
+          <div class="input-group">
+            <label class="neon-label">ENCRYPTION KEY:</label>
+            <input id="password" type="password" placeholder="●●●●●●●●●●●●●●●●●●●" class="cyber-input">
+          </div>
         </div>
       
         <div class="button-group">
@@ -58,6 +57,15 @@
           <button id="joinRoom" class="cyber-btn cyber-btn-secondary">
             <span class="btn-text">JOIN EXISTING</span>
             <span class="btn-glow"></span>
+          </button>
+        </div>
+
+        <div class="extra-controls">
+          <button id="safetyBtn" class="control-btn safety-btn">
+            <i class="fas fa-shield-alt"></i> SAFETY INFO
+          </button>
+          <button id="githubBtn" class="control-btn github-btn">
+            <i class="fab fa-github"></i> GITHUB
           </button>
         </div>
 
@@ -86,11 +94,14 @@
             <span class="light yellow active"></span>
             <span class="light green active"></span>
           </div>
-          <h2>MADE BY <href></href>GITHUB.COM/BADOVER</h2>
+          <h2>MADE BY <a href="https://github.com/badover" target="_blank" class="neon-yellow">BADOVER</a></h2>
         </div>
         <div class="header-right">
           <span class="room-display" id="currentRoom">ROOM: OFFLINE</span>
           <span class="user-display" id="currentUser">USER: ANONYMOUS</span>
+          <button id="leaveRoomBtn" class="leave-btn">
+            <i class="fas fa-sign-out-alt"></i> LEAVE
+          </button>
         </div>
       </div>
       
@@ -105,19 +116,69 @@
           <span class="input-prompt">></span>
           <input id="chatInput" placeholder="TYPE MESSAGE..." class="message-input">
           <button id="sendBtn" class="send-btn">
-            <span class="send-text">SEND REPLY</span>
+            <span class="send-text">SEND</span>
             <div class="send-glow"></div>
           </button>
         </div>
         <div class="status-bar">
-          <span>FUCK <span class="neon-green">PAUL DUROVE</span></span>
-          <!-- <span>ENCRYPTION: <span class="neon-blue">ACTIVE</span></span> -->
           <span>USERS: <span id="userCount" class="neon-yellow">1</span></span>
+          <div class="hidden-controls">
+            <button id="closeRoomBtn" class="hidden-btn" title="Close room (creator only)">
+              <i class="fas fa-skull-crossbones"></i>
+            </button>
+            <button id="safetyInfoBtn" class="hidden-btn" title="Safety info">
+              <i class="fas fa-user-shield"></i>
+            </button>
+            <button id="githubLinkBtn" class="hidden-btn" title="GitHub repository">
+              <i class="fab fa-github"></i>
+            </button>
+          </div>
         </div>
       </div>
     </div>
     
     <div class="cyber-grid"></div>
+  </div>
+
+  <div id="safetyModal" class="safety-modal">
+    <div class="safety-content">
+      <div class="safety-header">
+        <h2><i class="fas fa-user-shield"></i> SAFETY & SECURITY INFO</h2>
+        <button class="close-modal">&times;</button>
+      </div>
+      <div class="safety-body">
+        <div class="security-point">
+          <h3><i class="fas fa-file-contract"></i> NO METADATA</h3>
+          <p>All uploaded files are stripped of EXIF data, GPS coordinates, camera info, timestamps, and any other metadata.</p>
+        </div>
+        
+        <div class="security-point">
+          <h3><i class="fas fa-database"></i> NO DATABASES</h3>
+          <p>No chat logs are stored. No user data is collected. Everything is memory-only and deleted when you leave.</p>
+        </div>
+        
+        <div class="security-point">
+          <h3><i class="fas fa-key"></i> ENCRYPTED PASSWORDS</h3>
+          <p>Room passwords are SHA-256 hashed. No plain text passwords are ever stored on the server.</p>
+        </div>
+        
+        <div class="security-point">
+          <h3><i class="fas fa-trash-alt"></i> AUTO-FILE DELETION</h3>
+          <p>All uploaded files are permanently deleted when the room is closed or after 24 hours of inactivity.</p>
+        </div>
+        
+        <div class="warning-box">
+          <h3><i class="fas fa-exclamation-triangle"></i> IMPORTANT WARNINGS</h3>
+          <p>• Files in room are accessible to all users<br>
+             • Don't share personal information<br>
+             • Use strong, unique passwords!<br>
+        </div>
+        
+        <div class="repo-info">
+          <p><i class="fab fa-github"></i> Open Source: <a href="https://github.com/badover/FreeGram" target="_blank" class="neon-blue">github.com/badover/FreeGram</a></p>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
