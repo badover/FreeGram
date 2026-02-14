@@ -166,7 +166,6 @@ function emitVoiceParticipants(roomName) {
     speaking: !!state.speaking
   }));
 
-  // Voice roster is visible to everyone in the chat room, not only connected voice peers.
   io.to(roomName).emit("voiceParticipants", { participants });
 }
 

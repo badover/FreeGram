@@ -1290,7 +1290,7 @@ body {
     100% { transform: rotate(360deg); }
 }
 
-/* ========== МОБИЛЬНАЯ АДАПТАЦИЯ ========== */
+
 @media (max-width: 768px) {
     .drag-indicator-content {
         padding: 20px;
