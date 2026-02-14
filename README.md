@@ -46,6 +46,7 @@ Our team believe that every person has right for privacy. Many messengers nowada
 Contributions are welcome.
 
 You can help by:
+- Doing pull requests 
 - Reporting issues  
 - Suggesting improvements  
 
