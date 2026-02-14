@@ -15,7 +15,7 @@ FreeGram allows users to create temporary chat rooms using any login and passwor
 
 Room credentials can be securely shared with friends.  
 Each room is an isolated and private space where participants can exchange messages in real time.
-**In rooms you can send messages, videos, photos.** *In the future you can make videocalls, send voicemessages and other type of files.*
+**In rooms you can send messages, videos, photos, talk with your friends in audio-calls and all this without any logs.**
 
 Rooms are ephemeral and exist only while they are actively used.
 
