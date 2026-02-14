@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "start": "node server.js",
+    "build:voice-client": "esbuild public/vendor/mediasoup-client.entry.js --bundle --format=iife --outfile=public/vendor/mediasoup-client.bundle.js"
   },
   "keywords": [],
   "author": "",
@@ -13,9 +14,12 @@
   "type": "commonjs",
   "dependencies": {
     "dotenv": "^17.2.3",
+    "esbuild": "^0.27.3",
     "express": "^5.1.0",
     "express-rate-limit": "^8.2.1",
     "helmet": "^8.1.0",
+    "mediasoup": "^3.19.17",
+    "mediasoup-client": "^3.18.6",
     "sharp": "^0.34.5",
     "socket.io": "^4.8.1"
   }

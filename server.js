@@ -1,6 +1,8 @@
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
+const mediasoup = require("mediasoup");
+const os = require("os");
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
@@ -19,6 +21,20 @@ const MAX_NICK_LEN = 20;
 const MAX_ROOM_LEN = 30;
 const MAX_PASSWORD_LEN = 64;
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+
+const SERVER_HOST = process.env.HOST || "0.0.0.0";
+const WEBRTC_LISTEN_IP = process.env.WEBRTC_LISTEN_IP || "0.0.0.0";
+const WEBRTC_MIN_PORT = Number(process.env.WEBRTC_MIN_PORT || 40000);
+const WEBRTC_MAX_PORT = Number(process.env.WEBRTC_MAX_PORT || 49999);
+
+const MEDIA_CODECS = [
+  {
+    kind: "audio",
+    mimeType: "audio/opus",
+    clockRate: 48000,
+    channels: 2
+  }
+];
 
 const UPLOADS_DIR = path.join(__dirname, 'public', 'uploads');
 if (!fs.existsSync(UPLOADS_DIR)) {
@@ -44,6 +60,134 @@ const apiLimiter = rateLimit({
 
 const rooms = {};
 const roomFiles = {}; 
+let mediasoupWorker = null;
+let effectiveAnnouncedIp = process.env.WEBRTC_ANNOUNCED_IP || undefined;
+
+function detectLocalIPv4() {
+  const interfaces = os.networkInterfaces();
+  for (const values of Object.values(interfaces)) {
+    if (!Array.isArray(values)) continue;
+    for (const item of values) {
+      if (!item || item.family !== "IPv4" || item.internal) continue;
+      return item.address;
+    }
+  }
+  return null;
+}
+
+async function initMediasoupWorker() {
+  mediasoupWorker = await mediasoup.createWorker({
+    rtcMinPort: WEBRTC_MIN_PORT,
+    rtcMaxPort: WEBRTC_MAX_PORT
+  });
+
+  mediasoupWorker.on("died", () => {
+    console.error("Mediasoup worker died, exiting in 2 seconds");
+    setTimeout(() => process.exit(1), 2000);
+  });
+}
+
+async function getOrCreateVoiceRouter(roomName) {
+  const roomData = rooms[roomName];
+  if (!roomData) return null;
+  if (!mediasoupWorker) return null;
+
+  if (!roomData.voiceRouter) {
+    roomData.voiceRouter = await mediasoupWorker.createRouter({ mediaCodecs: MEDIA_CODECS });
+    roomData.voicePeers = Object.create(null);
+  }
+
+  return roomData.voiceRouter;
+}
+
+function ensureVoicePeer(roomName, socketId) {
+  const roomData = rooms[roomName];
+  if (!roomData) return null;
+
+  if (!roomData.voicePeers) roomData.voicePeers = Object.create(null);
+  if (!roomData.voicePeers[socketId]) {
+    roomData.voicePeers[socketId] = {
+      transports: new Map(),
+      producers: new Map(),
+      consumers: new Map()
+    };
+  }
+
+  return roomData.voicePeers[socketId];
+}
+
+function closePeerMedia(peer) {
+  if (!peer) return;
+
+  for (const consumer of peer.consumers.values()) {
+    try { consumer.close(); } catch (_) {}
+  }
+  for (const producer of peer.producers.values()) {
+    try { producer.close(); } catch (_) {}
+  }
+  for (const transport of peer.transports.values()) {
+    try { transport.close(); } catch (_) {}
+  }
+
+  peer.consumers.clear();
+  peer.producers.clear();
+  peer.transports.clear();
+}
+
+function listVoiceProducerInfos(roomName, excludeSocketId = null) {
+  const roomData = rooms[roomName];
+  if (!roomData || !roomData.voicePeers) return [];
+
+  const producers = [];
+
+  for (const [socketId, peer] of Object.entries(roomData.voicePeers)) {
+    if (excludeSocketId && socketId === excludeSocketId) continue;
+    for (const producer of peer.producers.values()) {
+      producers.push({
+        producerId: producer.id,
+        socketId,
+        nickname: (roomData.voiceUsers && roomData.voiceUsers[socketId]?.nickname) || "Anonymous"
+      });
+    }
+  }
+
+  return producers;
+}
+
+function emitVoiceParticipants(roomName) {
+  const roomData = rooms[roomName];
+  if (!roomData) return;
+
+  const participants = Object.entries(roomData.voiceUsers || {}).map(([socketId, state]) => ({
+    socketId,
+    nickname: state.nickname,
+    muted: !!state.muted,
+    deafened: !!state.deafened,
+    speaking: !!state.speaking
+  }));
+
+  // Voice roster is visible to everyone in the chat room, not only connected voice peers.
+  io.to(roomName).emit("voiceParticipants", { participants });
+}
+
+function leaveVoice(socket) {
+  if (!socket.room || !rooms[socket.room]) return;
+
+  const roomName = socket.room;
+  const roomData = rooms[roomName];
+  if (!roomData.voiceUsers || !roomData.voiceUsers[socket.id]) return;
+
+  if (roomData.voicePeers && roomData.voicePeers[socket.id]) {
+    closePeerMedia(roomData.voicePeers[socket.id]);
+    delete roomData.voicePeers[socket.id];
+  }
+
+  delete roomData.voiceUsers[socket.id];
+
+  io.to(roomName).emit("voiceUserLeft", { socketId: socket.id, nickname: socket.nickname });
+
+  emitVoiceParticipants(roomName);
+}
 
 app.use(express.static("public"));
 app.use('/uploads/', apiLimiter);
@@ -78,6 +222,21 @@ function deleteRoomFiles(roomName) {
   }
 }
 
+function closeRoomVoice(roomName) {
+  const roomData = rooms[roomName];
+  if (!roomData) return;
+
+  if (roomData.voicePeers) {
+    Object.values(roomData.voicePeers).forEach(closePeerMedia);
+    roomData.voicePeers = Object.create(null);
+  }
+
+  if (roomData.voiceRouter) {
+    try { roomData.voiceRouter.close(); } catch (_) {}
+    roomData.voiceRouter = null;
+  }
+}
+
 io.on("connection", (socket) => {
   socket.lastMsg = 0;
   // console.log("User connected:", socket.id);
@@ -99,6 +258,9 @@ io.on("connection", (socket) => {
     rooms[room] = {
       password: hashPassword(password),
       users: Object.create(null),
+      voiceUsers: Object.create(null),
+      voicePeers: Object.create(null),
+      voiceRouter: null,
       createdAt: Date.now(),
       creator: socket.id
     };
@@ -121,6 +283,7 @@ io.on("connection", (socket) => {
       userCount: 1,
       isCreator: true
     });
+    emitVoiceParticipants(room);
 
   });
 
@@ -161,6 +324,7 @@ io.on("connection", (socket) => {
       userCount: Object.keys(roomData.users).length,
       isCreator: roomData.creator === socket.id
     });
+    emitVoiceParticipants(room);
 
    
     socket.to(room).emit("userJoined", { nickname });
@@ -175,6 +339,7 @@ io.on("connection", (socket) => {
  
   socket.on("leaveRoom", ({ room }) => {
     if (socket.room && rooms[socket.room]) {
+      leaveVoice(socket);
       const userData = rooms[socket.room].users[socket.id];
       
       if (userData) {
@@ -197,6 +362,7 @@ io.on("connection", (socket) => {
           setTimeout(() => {
             if (rooms[socket.room] && Object.keys(rooms[socket.room].users).length === 0) {
               deleteRoomFiles(socket.room);
+              closeRoomVoice(socket.room);
               delete rooms[socket.room];
               console.log(`Room ${socket.room} deleted`);
             }
@@ -228,12 +394,270 @@ io.on("connection", (socket) => {
       reason: "host_closed",
       closedBy: socket.nickname
     });
+
+    io.to(room).emit("voiceRoomClosed");
+
+    closeRoomVoice(room);
     
     deleteRoomFiles(room);
     delete rooms[room];
     io.in(room).socketsLeave(room);
     
     // console.log(`Room ${room} closed and files deleted`);
+  });
+
+  socket.on("voiceJoin", async (_, callback) => {
+    try {
+      if (!socket.room || !rooms[socket.room]) {
+        callback && callback({ ok: false, error: "Room not found" });
+        return;
+      }
+      if (!mediasoupWorker) {
+        callback && callback({ ok: false, error: "Voice service unavailable" });
+        return;
+      }
+
+      const roomData = rooms[socket.room];
+      if (!roomData.users[socket.id]) {
+        callback && callback({ ok: false, error: "Not a room member" });
+        return;
+      }
+
+      const router = await getOrCreateVoiceRouter(socket.room);
+      if (!router) {
+        callback && callback({ ok: false, error: "Failed to init voice router" });
+        return;
+      }
+
+      ensureVoicePeer(socket.room, socket.id);
+      roomData.voiceUsers[socket.id] = {
+        nickname: socket.nickname || "Anonymous",
+        muted: false,
+        deafened: false,
+        speaking: false
+      };
+
+      emitVoiceParticipants(socket.room);
+      callback && callback({
+        ok: true,
+        routerRtpCapabilities: router.rtpCapabilities,
+        existingProducers: listVoiceProducerInfos(socket.room, socket.id)
+      });
+    } catch (error) {
+      console.error("voiceJoin error:", error);
+      callback && callback({ ok: false, error: "voiceJoin failed" });
+    }
+  });
+
+  socket.on("voiceCreateTransport", async ({ direction } = {}, callback) => {
+    try {
+      if (!socket.room || !rooms[socket.room]) {
+        callback && callback({ ok: false, error: "Room not found" });
+        return;
+      }
+      const roomData = rooms[socket.room];
+      if (!roomData.voiceUsers[socket.id]) {
+        callback && callback({ ok: false, error: "Join voice first" });
+        return;
+      }
+
+      const router = await getOrCreateVoiceRouter(socket.room);
+      const peer = ensureVoicePeer(socket.room, socket.id);
+
+      const listenIp = effectiveAnnouncedIp
+        ? { ip: WEBRTC_LISTEN_IP, announcedIp: effectiveAnnouncedIp }
+        : { ip: WEBRTC_LISTEN_IP };
+
+      const transport = await router.createWebRtcTransport({
+        listenIps: [listenIp],
+        enableUdp: true,
+        enableTcp: true,
+        preferUdp: true,
+        initialAvailableOutgoingBitrate: 1200000
+      });
+
+      transport.appData = { socketId: socket.id, direction: direction || "send" };
+
+      transport.on("dtlsstatechange", (dtlsState) => {
+        if (dtlsState === "closed") {
+          try { transport.close(); } catch (_) {}
+        }
+      });
+
+      transport.on("close", () => {
+        if (peer.transports) peer.transports.delete(transport.id);
+      });
+
+      peer.transports.set(transport.id, transport);
+
+      callback && callback({
+        ok: true,
+        id: transport.id,
+        iceParameters: transport.iceParameters,
+        iceCandidates: transport.iceCandidates,
+        dtlsParameters: transport.dtlsParameters
+      });
+    } catch (error) {
+      console.error("voiceCreateTransport error:", error);
+      callback && callback({ ok: false, error: "voiceCreateTransport failed" });
+    }
+  });
+
+  socket.on("voiceConnectTransport", async ({ transportId, dtlsParameters } = {}, callback) => {
+    try {
+      if (!socket.room || !rooms[socket.room]) {
+        callback && callback({ ok: false, error: "Room not found" });
+        return;
+      }
+      const peer = ensureVoicePeer(socket.room, socket.id);
+      const transport = peer.transports.get(transportId);
+      if (!transport) {
+        callback && callback({ ok: false, error: "Transport not found" });
+        return;
+      }
+
+      await transport.connect({ dtlsParameters });
+      callback && callback({ ok: true });
+    } catch (error) {
+      console.error("voiceConnectTransport error:", error);
+      callback && callback({ ok: false, error: "voiceConnectTransport failed" });
+    }
+  });
+
+  socket.on("voiceProduce", async ({ transportId, kind, rtpParameters } = {}, callback) => {
+    try {
+      if (!socket.room || !rooms[socket.room]) {
+        callback && callback({ ok: false, error: "Room not found" });
+        return;
+      }
+      const peer = ensureVoicePeer(socket.room, socket.id);
+      const transport = peer.transports.get(transportId);
+      if (!transport) {
+        callback && callback({ ok: false, error: "Transport not found" });
+        return;
+      }
+
+      const producer = await transport.produce({
+        kind,
+        rtpParameters,
+        appData: { socketId: socket.id }
+      });
+
+      peer.producers.set(producer.id, producer);
+
+      producer.on("transportclose", () => {
+        peer.producers.delete(producer.id);
+      });
+
+      producer.on("close", () => {
+        peer.producers.delete(producer.id);
+      });
+
+      socket.to(socket.room).emit("voiceNewProducer", {
+        producerId: producer.id,
+        socketId: socket.id,
+        nickname: socket.nickname || "Anonymous"
+      });
+
+      callback && callback({ ok: true, id: producer.id });
+    } catch (error) {
+      console.error("voiceProduce error:", error);
+      callback && callback({ ok: false, error: "voiceProduce failed" });
+    }
+  });
+
+  socket.on("voiceConsume", async ({ transportId, producerId, rtpCapabilities } = {}, callback) => {
+    try {
+      if (!socket.room || !rooms[socket.room]) {
+        callback && callback({ ok: false, error: "Room not found" });
+        return;
+      }
+      const roomData = rooms[socket.room];
+      const router = roomData.voiceRouter;
+      if (!router) {
+        callback && callback({ ok: false, error: "Voice router not found" });
+        return;
+      }
+      if (!router.canConsume({ producerId, rtpCapabilities })) {
+        callback && callback({ ok: false, error: "Cannot consume this producer" });
+        return;
+      }
+
+      const peer = ensureVoicePeer(socket.room, socket.id);
+      const transport = peer.transports.get(transportId);
+      if (!transport) {
+        callback && callback({ ok: false, error: "Transport not found" });
+        return;
+      }
+
+      const consumer = await transport.consume({
+        producerId,
+        rtpCapabilities,
+        paused: true
+      });
+
+      peer.consumers.set(consumer.id, consumer);
+
+      consumer.on("transportclose", () => {
+        peer.consumers.delete(consumer.id);
+      });
+
+      consumer.on("producerclose", () => {
+        peer.consumers.delete(consumer.id);
+        socket.emit("voiceProducerClosed", { producerId });
+      });
+
+      callback && callback({
+        ok: true,
+        id: consumer.id,
+        producerId,
+        kind: consumer.kind,
+        rtpParameters: consumer.rtpParameters
+      });
+    } catch (error) {
+      console.error("voiceConsume error:", error);
+      callback && callback({ ok: false, error: "voiceConsume failed" });
+    }
+  });
+
+  socket.on("voiceResumeConsumer", async ({ consumerId } = {}, callback) => {
+    try {
+      if (!socket.room || !rooms[socket.room]) {
+        callback && callback({ ok: false, error: "Room not found" });
+        return;
+      }
+
+      const peer = ensureVoicePeer(socket.room, socket.id);
+      const consumer = peer.consumers.get(consumerId);
+      if (!consumer) {
+        callback && callback({ ok: false, error: "Consumer not found" });
+        return;
+      }
+
+      await consumer.resume();
+      callback && callback({ ok: true });
+    } catch (error) {
+      console.error("voiceResumeConsumer error:", error);
+      callback && callback({ ok: false, error: "voiceResumeConsumer failed" });
+    }
+  });
+
+  socket.on("voiceLeave", (_, callback) => {
+    leaveVoice(socket);
+    callback && callback({ ok: true });
+  });
+
+  socket.on("voiceStateUpdate", (payload = {}) => {
+    if (!socket.room || !rooms[socket.room]) return;
+    const roomData = rooms[socket.room];
+    const state = roomData.voiceUsers && roomData.voiceUsers[socket.id];
+    if (!state) return;
+
+    if (typeof payload.muted === "boolean") state.muted = payload.muted;
+    if (typeof payload.deafened === "boolean") state.deafened = payload.deafened;
+    if (typeof payload.speaking === "boolean") state.speaking = payload.speaking;
+
+    emitVoiceParticipants(socket.room);
   });
 
 
@@ -410,6 +834,7 @@ io.on("connection", (socket) => {
     // console.log("User disconnected:", socket.id);
     
     if (socket.room && rooms[socket.room]) {
+      leaveVoice(socket);
       const userData = rooms[socket.room].users[socket.id];
       
       if (userData) {      
@@ -434,6 +859,7 @@ io.on("connection", (socket) => {
             if (rooms[socket.room] && Object.keys(rooms[socket.room].users).length === 0) {
               // console.log(`Deleting empty room ${socket.room}`);
               deleteRoomFiles(socket.room);
+              closeRoomVoice(socket.room);
               delete rooms[socket.room];
             }
           }, 300000); 
@@ -478,6 +904,29 @@ app.use((req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 
-server.listen(3000, "127.0.0.1", () => {
-  console.log("🚀 Server running on http://127.0.0.1:3000");
+async function startServer() {
+  if (!effectiveAnnouncedIp) {
+    if (WEBRTC_LISTEN_IP === "127.0.0.1") {
+      effectiveAnnouncedIp = undefined;
+    } else if (SERVER_HOST === "127.0.0.1" || SERVER_HOST === "localhost") {
+      effectiveAnnouncedIp = undefined;
+    } else {
+      effectiveAnnouncedIp = detectLocalIPv4() || undefined;
+    }
+  }
+
+  await initMediasoupWorker();
+  if (WEBRTC_LISTEN_IP === "0.0.0.0" && !effectiveAnnouncedIp) {
+    console.warn("⚠️ Could not detect WEBRTC announced IP. Set WEBRTC_ANNOUNCED_IP manually for remote clients.");
+  }
+
+  server.listen(PORT, SERVER_HOST, () => {
+    console.log(`🚀 Server running on http://${SERVER_HOST}:${PORT}`);
+    console.log(`🎙️ Voice SFU ready (listen ${WEBRTC_LISTEN_IP}, announced ${effectiveAnnouncedIp || "none"}, UDP/TCP ${WEBRTC_MIN_PORT}-${WEBRTC_MAX_PORT})`);
+  });
+}
+
+startServer().catch((error) => {
+  console.error("Failed to start server:", error);
+  process.exit(1);
 });

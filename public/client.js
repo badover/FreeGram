@@ -18,17 +18,38 @@ const joinRoomBtn = document.getElementById("joinRoom");
 const safetyBtn = document.getElementById("safetyBtn");
 const githubBtn = document.getElementById("githubBtn");
 const leaveRoomBtn = document.getElementById("leaveRoomBtn");
-const closeRoomBtn = document.getElementById("closeRoomBtn");
-const safetyInfoBtn = document.getElementById("safetyInfoBtn");
-const githubLinkBtn = document.getElementById("githubLinkBtn");
 const safetyModal = document.getElementById("safetyModal");
 const closeModalBtn = document.querySelector('.close-modal');
+const voiceJoinBtn = document.getElementById("voiceJoinBtn");
+const voiceLeaveBtn = document.getElementById("voiceLeaveBtn");
+const voiceMuteBtn = document.getElementById("voiceMuteBtn");
+const voiceDeafenBtn = document.getElementById("voiceDeafenBtn");
+const voiceStatusLabel = document.getElementById("voiceStatusLabel");
+const voiceUsersList = document.getElementById("voiceUsersList");
 
 let currentRoom = "";
 let currentNickname = "";
 let typingUsers = new Map(); 
 let typingTimeout = null;
 let isTyping = false;
+let voiceJoined = false;
+let voiceMuted = false;
+let voiceDeafened = false;
+let voiceLocalStream = null;
+let voiceDevice = null;
+let voiceSendTransport = null;
+let voiceRecvTransport = null;
+let voiceProducer = null;
+let voiceConsumers = new Map();
+let voiceAudioElements = new Map();
+let voiceConsumeQueue = new Set();
+let voiceVadContext = null;
+let voiceVadAnalyser = null;
+let voiceVadTimer = null;
+let voiceSpeaking = false;
+let voiceParticipants = new Map();
+let voiceNeedsUnlock = false;
+let voiceUnlockHintShown = false;
 
 
 if (createRoomBtn) {
@@ -219,19 +240,8 @@ if (githubBtn) {
   });
 }
 
-if (githubLinkBtn) {
-  githubLinkBtn.addEventListener('click', () => {
-    window.open('https://github.com/badover/FreeGram', '_blank');
-  });
-}
-
-
 if (safetyBtn) {
   safetyBtn.addEventListener('click', showSafetyModal);
-}
-
-if (safetyInfoBtn) {
-  safetyInfoBtn.addEventListener('click', showSafetyModal);
 }
 
 if (closeModalBtn) {
@@ -252,11 +262,6 @@ if (leaveRoomBtn) {
 }
 
 
-if (closeRoomBtn) {
-  closeRoomBtn.addEventListener('click', closeRoom);
-}
-
-
 function showSafetyModal() {
   if (safetyModal) {
     safetyModal.style.display = 'flex';
@@ -273,6 +278,7 @@ function leaveRoom() {
   if (!currentRoom) return;
   
   if (confirm('Are you sure you want to leave this room?')) {
+    leaveVoiceChannel(true);
     socket.emit('leaveRoom', { room: currentRoom });
     
     chatScreen.style.display = 'none';
@@ -285,15 +291,6 @@ function leaveRoom() {
     addSystemMessage('>>> Left the room');
   }
 }
-
-function closeRoom() {
-  if (!currentRoom) return;
-  
-  if (confirm('⚠️ CLOSE ROOM FOR EVERYONE?\nThis will kick all users and delete all files. (Only creator of the room can do it)')) {
-    socket.emit('closeRoom', { room: currentRoom });
-  }
-}
-
 
 function showError(msg) {
   loginError.textContent = msg;
@@ -355,6 +352,7 @@ socket.on("roomJoined", (data) => {
   chatScreen.style.display = "block";
   
   messagesList.innerHTML = "";
+  resetVoiceStateUI();
   
   addSystemMessage(`>>> ROOM: ${currentRoom}`);
   // addSystemMessage(">>> ALL FILES ARE STRIPPED OF METADATA");
@@ -365,6 +363,7 @@ socket.on("roomJoined", (data) => {
 });
 
 socket.on("roomClosed", (data) => {
+  leaveVoiceChannel(false);
   addSystemMessage(`>>> ROOM CLOSED BY ${data.closedBy}`);
   addSystemMessage(">>> ALL FILES DELETED");
   
@@ -540,7 +539,7 @@ function addTextMessage(data) {
     messageDiv.className = "message-self";
     messageDiv.innerHTML = `
       <div class="message-header">
-        <span class="message-nickname">${data.nickname} [YOU]</span>
+        <span class="message-nickname">${data.nickname}</span>
         <span class="message-time">${data.time}</span>
       </div>
       <div class="message-content">${escapeHtml(data.msg)}</div>
@@ -574,7 +573,8 @@ function addMediaMessage(data) {
         <img src="${safeMediaURL(data.thumbnail || data.fileUrl)}" 
              alt="${escapeHtml(data.fileName)}"
              class="media-thumbnail"
-             onclick="openFullImage('${safeMediaURL(data.fileUrl)}')">
+             onclick="event.stopPropagation(); openFullImage('${safeMediaURL(data.fileUrl)}'); return false;"
+             ontouchstart="event.stopPropagation();">
         <div class="media-info">
           <strong>📸 ${escapeHtml(data.fileName)}</strong>
           <small>${fileSize}</small>
@@ -603,7 +603,7 @@ function addMediaMessage(data) {
   
   messageDiv.innerHTML = `
     <div class="message-header">
-      <span class="message-nickname">${escapeHtml(data.nickname)} ${data.self ? '[YOU]' : ''}</span>
+      <span class="message-nickname">${escapeHtml(data.nickname)}</span>
       <span class="message-time">${escapeHtml(data.time)}</span>
     </div>
     ${mediaContent}
@@ -906,6 +906,457 @@ function addUploadNotification(file) {
     }, 3000);
 }
 
+function resetVoiceStateUI() {
+  voiceJoined = false;
+  voiceMuted = false;
+  voiceDeafened = false;
+  voiceSpeaking = false;
+  voiceParticipants.clear();
+  voiceConsumeQueue.clear();
+  renderVoiceParticipants();
+  updateVoiceButtons();
+}
+
+function updateVoiceButtons() {
+  if (voiceJoinBtn) voiceJoinBtn.disabled = voiceJoined;
+  if (voiceLeaveBtn) voiceLeaveBtn.disabled = !voiceJoined;
+  if (voiceMuteBtn) {
+    voiceMuteBtn.disabled = !voiceJoined;
+    voiceMuteBtn.classList.toggle("active", voiceMuted);
+    voiceMuteBtn.innerHTML = voiceMuted
+      ? '<i class="fas fa-microphone-slash"></i> UNMUTE'
+      : '<i class="fas fa-microphone"></i> MUTE';
+  }
+  if (voiceDeafenBtn) {
+    voiceDeafenBtn.disabled = !voiceJoined;
+    voiceDeafenBtn.classList.toggle("active", voiceDeafened);
+    voiceDeafenBtn.innerHTML = voiceDeafened
+      ? '<i class="fas fa-volume-up"></i> UNDEAFEN'
+      : '<i class="fas fa-headphones"></i> DEAFEN';
+  }
+  if (voiceStatusLabel) {
+    if (!voiceJoined) {
+      voiceStatusLabel.textContent = "VOICE: OFF";
+    } else if (voiceDeafened) {
+      voiceStatusLabel.textContent = "VOICE: DEAFENED";
+    } else if (voiceMuted) {
+      voiceStatusLabel.textContent = "VOICE: MUTED";
+    } else {
+      voiceStatusLabel.textContent = "VOICE: LIVE";
+    }
+  }
+}
+
+function renderVoiceParticipants() {
+  if (!voiceUsersList) return;
+  voiceUsersList.innerHTML = "";
+
+  if (voiceParticipants.size === 0) {
+    const empty = document.createElement("div");
+    empty.className = "voice-user voice-empty";
+    empty.textContent = "No one in voice";
+    voiceUsersList.appendChild(empty);
+    return;
+  }
+
+  for (const participant of voiceParticipants.values()) {
+    const item = document.createElement("div");
+    item.className = "voice-user";
+    if (voiceJoined && participant.speaking) item.classList.add("speaking");
+
+    const flags = [];
+    if (participant.muted) flags.push("MUTED");
+    if (participant.deafened) flags.push("DEAF");
+
+    item.textContent = `${participant.nickname}${participant.socketId === socket.id ? " [YOU]" : ""}${flags.length ? ` (${flags.join(", ")})` : ""}`;
+    voiceUsersList.appendChild(item);
+  }
+}
+
+function voiceRequest(eventName, payload = {}) {
+  return new Promise((resolve, reject) => {
+    socket.emit(eventName, payload, (response) => {
+      if (!response || response.ok === false) {
+        reject(new Error(response?.error || `${eventName} failed`));
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
+function startVoiceVad(stream) {
+  stopVoiceVad();
+
+  voiceVadContext = new AudioContext();
+  const source = voiceVadContext.createMediaStreamSource(stream);
+  voiceVadAnalyser = voiceVadContext.createAnalyser();
+  voiceVadAnalyser.fftSize = 1024;
+  source.connect(voiceVadAnalyser);
+
+  const data = new Uint8Array(voiceVadAnalyser.fftSize);
+  voiceVadTimer = setInterval(() => {
+    if (!voiceJoined || voiceMuted || voiceDeafened || !voiceVadAnalyser) {
+      if (voiceSpeaking) {
+        voiceSpeaking = false;
+        socket.emit("voiceStateUpdate", { speaking: false });
+      }
+      return;
+    }
+
+    voiceVadAnalyser.getByteTimeDomainData(data);
+    let total = 0;
+    for (let i = 0; i < data.length; i += 1) {
+      total += Math.abs(data[i] - 128);
+    }
+
+    const level = total / data.length;
+    const nowSpeaking = level > 3.2;
+    if (nowSpeaking !== voiceSpeaking) {
+      voiceSpeaking = nowSpeaking;
+      socket.emit("voiceStateUpdate", { speaking: nowSpeaking });
+    }
+  }, 120);
+}
+
+function stopVoiceVad() {
+  if (voiceVadTimer) {
+    clearInterval(voiceVadTimer);
+    voiceVadTimer = null;
+  }
+  if (voiceVadContext) {
+    voiceVadContext.close().catch(() => {});
+    voiceVadContext = null;
+    voiceVadAnalyser = null;
+  }
+}
+
+function cleanupConsumer(producerId) {
+  const item = voiceConsumers.get(producerId);
+  if (!item) return;
+
+  try { item.consumer.close(); } catch (_) {}
+  if (item.audioEl) {
+    item.audioEl.pause();
+    item.audioEl.srcObject = null;
+    item.audioEl.remove();
+  }
+
+  voiceConsumers.delete(producerId);
+  voiceAudioElements.delete(producerId);
+}
+
+function tryPlayRemoteAudio(audioEl) {
+  if (!audioEl) return;
+  const playPromise = audioEl.play();
+  if (playPromise && typeof playPromise.catch === "function") {
+    playPromise.catch(() => {
+      voiceNeedsUnlock = true;
+      if (!voiceUnlockHintShown) {
+        voiceUnlockHintShown = true;
+        addSystemMessage(">>> Click anywhere once to unlock voice audio");
+      }
+    });
+  }
+}
+
+function unlockVoiceAudio() {
+  if (!voiceNeedsUnlock) return;
+  for (const audioEl of voiceAudioElements.values()) {
+    tryPlayRemoteAudio(audioEl);
+  }
+  const allReady = Array.from(voiceAudioElements.values()).every((el) => !el.paused);
+  if (allReady) {
+    voiceNeedsUnlock = false;
+    voiceUnlockHintShown = false;
+  }
+}
+
+async function consumeProducer(producerId) {
+  if (!voiceJoined || !voiceDevice || !voiceRecvTransport || !producerId) return;
+  if (voiceConsumers.has(producerId) || voiceConsumeQueue.has(producerId)) return;
+
+  voiceConsumeQueue.add(producerId);
+  try {
+    const consumeData = await voiceRequest("voiceConsume", {
+      transportId: voiceRecvTransport.id,
+      producerId,
+      rtpCapabilities: voiceDevice.rtpCapabilities
+    });
+
+    const consumer = await voiceRecvTransport.consume({
+      id: consumeData.id,
+      producerId: consumeData.producerId,
+      kind: consumeData.kind,
+      rtpParameters: consumeData.rtpParameters
+    });
+
+    const stream = new MediaStream([consumer.track]);
+    const audioEl = document.createElement("audio");
+    audioEl.autoplay = true;
+    audioEl.playsInline = true;
+    audioEl.srcObject = stream;
+    audioEl.muted = !!voiceDeafened;
+    audioEl.style.display = "none";
+    document.body.appendChild(audioEl);
+    tryPlayRemoteAudio(audioEl);
+
+    voiceConsumers.set(producerId, { consumer, audioEl });
+    voiceAudioElements.set(producerId, audioEl);
+
+    consumer.on("transportclose", () => cleanupConsumer(producerId));
+    consumer.on("producerclose", () => cleanupConsumer(producerId));
+    consumer.on("trackended", () => cleanupConsumer(producerId));
+
+    await voiceRequest("voiceResumeConsumer", { consumerId: consumer.id });
+  } catch (error) {
+    console.error("consumeProducer error:", error);
+  } finally {
+    voiceConsumeQueue.delete(producerId);
+  }
+}
+
+async function joinVoiceChannel() {
+  if (!currentRoom || voiceJoined) return;
+  if (!window.mediasoupClient || !window.mediasoupClient.Device) {
+    addSystemMessage(">>> Voice error: mediasoup-client bundle missing");
+    return;
+  }
+
+  try {
+    voiceLocalStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1
+      }
+    });
+  } catch (error) {
+    addSystemMessage(">>> Voice error: microphone access denied");
+    return;
+  }
+
+  try {
+    const joinData = await voiceRequest("voiceJoin");
+    voiceDevice = new window.mediasoupClient.Device();
+    await voiceDevice.load({ routerRtpCapabilities: joinData.routerRtpCapabilities });
+
+    const sendTransportData = await voiceRequest("voiceCreateTransport", { direction: "send" });
+    voiceSendTransport = voiceDevice.createSendTransport({
+      id: sendTransportData.id,
+      iceParameters: sendTransportData.iceParameters,
+      iceCandidates: sendTransportData.iceCandidates,
+      dtlsParameters: sendTransportData.dtlsParameters
+    });
+
+    voiceSendTransport.on("connect", ({ dtlsParameters }, callback, errback) => {
+      voiceRequest("voiceConnectTransport", {
+        transportId: voiceSendTransport.id,
+        dtlsParameters
+      }).then(() => callback()).catch(errback);
+    });
+
+    voiceSendTransport.on("produce", ({ kind, rtpParameters }, callback, errback) => {
+      voiceRequest("voiceProduce", {
+        transportId: voiceSendTransport.id,
+        kind,
+        rtpParameters
+      }).then((result) => callback({ id: result.id })).catch(errback);
+    });
+
+    const recvTransportData = await voiceRequest("voiceCreateTransport", { direction: "recv" });
+    voiceRecvTransport = voiceDevice.createRecvTransport({
+      id: recvTransportData.id,
+      iceParameters: recvTransportData.iceParameters,
+      iceCandidates: recvTransportData.iceCandidates,
+      dtlsParameters: recvTransportData.dtlsParameters
+    });
+
+    voiceRecvTransport.on("connect", ({ dtlsParameters }, callback, errback) => {
+      voiceRequest("voiceConnectTransport", {
+        transportId: voiceRecvTransport.id,
+        dtlsParameters
+      }).then(() => callback()).catch(errback);
+    });
+
+    const micTrack = voiceLocalStream.getAudioTracks()[0];
+    voiceProducer = await voiceSendTransport.produce({ track: micTrack });
+
+    voiceJoined = true;
+    voiceMuted = false;
+    voiceDeafened = false;
+    voiceSpeaking = false;
+
+    startVoiceVad(voiceLocalStream);
+    updateVoiceButtons();
+    socket.emit("voiceStateUpdate", { muted: false, deafened: false, speaking: false });
+    addSystemMessage(">>> Voice connected");
+
+    for (const producerInfo of (joinData.existingProducers || [])) {
+      await consumeProducer(producerInfo.producerId);
+    }
+  } catch (error) {
+    console.error("joinVoiceChannel error:", error);
+    addSystemMessage(`>>> Voice error: ${error.message}`);
+    leaveVoiceChannel(true);
+  }
+}
+
+function leaveVoiceChannel(notifyServer) {
+  if (!voiceJoined && !voiceLocalStream && !voiceDevice) {
+    resetVoiceStateUI();
+    return;
+  }
+
+  if (notifyServer) {
+    socket.emit("voiceLeave", {}, () => {});
+  }
+
+  stopVoiceVad();
+  if (voiceProducer) {
+    try { voiceProducer.close(); } catch (_) {}
+    voiceProducer = null;
+  }
+  for (const producerId of Array.from(voiceConsumers.keys())) {
+    cleanupConsumer(producerId);
+  }
+  if (voiceSendTransport) {
+    try { voiceSendTransport.close(); } catch (_) {}
+    voiceSendTransport = null;
+  }
+  if (voiceRecvTransport) {
+    try { voiceRecvTransport.close(); } catch (_) {}
+    voiceRecvTransport = null;
+  }
+  if (voiceLocalStream) {
+    voiceLocalStream.getTracks().forEach((track) => track.stop());
+    voiceLocalStream = null;
+  }
+  voiceDevice = null;
+
+  voiceJoined = false;
+  voiceMuted = false;
+  voiceDeafened = false;
+  voiceSpeaking = false;
+  voiceParticipants.clear();
+  voiceConsumeQueue.clear();
+  voiceConsumers.clear();
+  voiceAudioElements.clear();
+
+  renderVoiceParticipants();
+  updateVoiceButtons();
+}
+
+async function toggleVoiceMute() {
+  if (!voiceJoined) return;
+  voiceMuted = !voiceMuted;
+  if (voiceMuted || voiceDeafened) {
+    if (voiceProducer && !voiceProducer.paused) await voiceProducer.pause();
+  } else if (voiceProducer && voiceProducer.paused) {
+    await voiceProducer.resume();
+  }
+  if (voiceMuted) voiceSpeaking = false;
+
+  socket.emit("voiceStateUpdate", {
+    muted: voiceMuted,
+    deafened: voiceDeafened,
+    speaking: voiceSpeaking
+  });
+  updateVoiceButtons();
+}
+
+async function toggleVoiceDeafen() {
+  if (!voiceJoined) return;
+
+  voiceDeafened = !voiceDeafened;
+  if (voiceDeafened) {
+    voiceMuted = true;
+    voiceSpeaking = false;
+  }
+
+  for (const audioEl of voiceAudioElements.values()) {
+    audioEl.muted = !!voiceDeafened;
+  }
+
+  if (voiceDeafened || voiceMuted) {
+    if (voiceProducer && !voiceProducer.paused) await voiceProducer.pause();
+  } else if (voiceProducer && voiceProducer.paused) {
+    await voiceProducer.resume();
+  }
+
+  socket.emit("voiceStateUpdate", {
+    muted: voiceMuted,
+    deafened: voiceDeafened,
+    speaking: voiceSpeaking
+  });
+  updateVoiceButtons();
+}
+
+if (voiceJoinBtn) {
+  voiceJoinBtn.addEventListener("click", () => {
+    joinVoiceChannel().catch((error) => {
+      console.error("voice join click error:", error);
+    });
+  });
+}
+
+if (voiceLeaveBtn) {
+  voiceLeaveBtn.addEventListener("click", () => {
+    leaveVoiceChannel(true);
+    addSystemMessage(">>> Voice disconnected");
+  });
+}
+
+if (voiceMuteBtn) {
+  voiceMuteBtn.addEventListener("click", () => {
+    toggleVoiceMute().catch((error) => {
+      console.error("voice mute toggle error:", error);
+    });
+  });
+}
+
+if (voiceDeafenBtn) {
+  voiceDeafenBtn.addEventListener("click", () => {
+    toggleVoiceDeafen().catch((error) => {
+      console.error("voice deafen toggle error:", error);
+    });
+  });
+}
+
+socket.on("voiceParticipants", ({ participants } = {}) => {
+  const nextParticipants = new Map();
+  (participants || []).forEach((participant) => {
+    nextParticipants.set(participant.socketId, participant);
+  });
+  voiceParticipants = nextParticipants;
+  renderVoiceParticipants();
+});
+
+socket.on("voiceUserLeft", ({ socketId } = {}) => {
+  if (!socketId) return;
+});
+
+socket.on("voiceRoomClosed", () => {
+  leaveVoiceChannel(false);
+});
+
+socket.on("voiceNewProducer", ({ producerId } = {}) => {
+  if (!voiceJoined || !producerId) return;
+  consumeProducer(producerId).catch((error) => {
+    console.error("voiceNewProducer consume error:", error);
+  });
+});
+
+socket.on("voiceProducerClosed", ({ producerId } = {}) => {
+  if (!producerId) return;
+  cleanupConsumer(producerId);
+});
+
+socket.on("disconnect", () => {
+  leaveVoiceChannel(false);
+});
+
 document.addEventListener('keydown', handleEscapeKey);
 
 function handleEscapeKey(e) {
@@ -1041,7 +1492,14 @@ function handleGlobalDrop(e) {
     }
 }
 
-messagesList.addEventListener("click", () => {
+messagesList.addEventListener("click", (e) => {
+  if (!chatInput) return;
+
+  const interactiveTarget = e.target.closest(
+    ".media-thumbnail, .view-link, .download-link, video, a, button, input, textarea"
+  );
+
+  if (interactiveTarget) return;
   chatInput.focus();
 });
 
@@ -1049,6 +1507,17 @@ window.addEventListener("DOMContentLoaded", () => {
   nicknameInput.value = "";
   roomInput.value = "";
   passwordInput.value = "";
+  resetVoiceStateUI();
   
   nicknameInput.focus();
 });
+
+window.addEventListener("beforeunload", () => {
+  if (voiceJoined) {
+    socket.emit("voiceLeave", {}, () => {});
+  }
+  stopVoiceVad();
+});
+
+document.addEventListener("click", unlockVoiceAudio, { passive: true });
+document.addEventListener("keydown", unlockVoiceAudio);

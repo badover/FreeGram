@@ -62,7 +62,7 @@
 
         <div class="extra-controls">
           <button id="safetyBtn" class="control-btn safety-btn">
-            <i class="fas fa-shield-alt"></i> SAFETY INFO
+            <i class="fas fa-circle-info"></i> ABOUT FREEGRAM
           </button>
           <button id="githubBtn" class="control-btn github-btn">
             <i class="fab fa-github"></i> GITHUB
@@ -109,6 +109,19 @@
       <div class="messages-container">
         <div id="messages" class="messages"></div>
       </div>
+
+      <div class="voice-panel">
+        <div class="voice-panel-header">
+          <span id="voiceStatusLabel">VOICE: OFF</span>
+          <div class="voice-controls">
+            <button id="voiceJoinBtn" class="voice-btn"><i class="fas fa-phone-volume"></i> JOIN</button>
+            <button id="voiceLeaveBtn" class="voice-btn" disabled><i class="fas fa-phone-slash"></i> LEAVE</button>
+            <button id="voiceMuteBtn" class="voice-btn" disabled><i class="fas fa-microphone"></i> MUTE</button>
+            <button id="voiceDeafenBtn" class="voice-btn" disabled><i class="fas fa-headphones"></i> DEAFEN</button>
+          </div>
+        </div>
+        <div id="voiceUsersList" class="voice-users-list"></div>
+      </div>
       
       
       <div class="input-panel">
@@ -122,17 +135,6 @@
         </div>
         <div class="status-bar">
           <span>USERS: <span id="userCount" class="neon-yellow">1</span></span>
-          <div class="hidden-controls">
-            <button id="closeRoomBtn" class="hidden-btn" title="Close room (creator only)">
-              <i class="fas fa-skull-crossbones"></i>
-            </button>
-            <button id="safetyInfoBtn" class="hidden-btn" title="Safety info">
-              <i class="fas fa-user-shield"></i>
-            </button>
-            <button id="githubLinkBtn" class="hidden-btn" title="GitHub repository">
-              <i class="fab fa-github"></i>
-            </button>
-          </div>
         </div>
       </div>
     </div>
@@ -143,37 +145,35 @@
   <div id="safetyModal" class="safety-modal">
     <div class="safety-content">
       <div class="safety-header">
-        <h2><i class="fas fa-user-shield"></i> SAFETY & SECURITY INFO</h2>
+        <h2><i class="fas fa-circle-info"></i> ABOUT FREEGRAM</h2>
         <button class="close-modal">&times;</button>
       </div>
       <div class="safety-body">
         <div class="security-point">
-          <h3><i class="fas fa-file-contract"></i> NO METADATA</h3>
-          <p>All uploaded files are stripped of EXIF data, GPS coordinates, camera info, timestamps, and any other metadata.</p>
+          <h3><i class="fas fa-circle-info"></i> ABOUT THIS SITE</h3>
+          <p>Freegram is an open-source messenger where users can create or join rooms for chat, voice calls, and file sharing.</p>
         </div>
-        
+
         <div class="security-point">
-          <h3><i class="fas fa-database"></i> NO DATABASES</h3>
-          <p>No chat logs are stored. No user data is collected. Everything is memory-only and deleted when you leave.</p>
+          <h3><i class="fas fa-door-open"></i> WHAT IS A ROOM</h3>
+          <p>A room is a private chat space. People with the same room name and key can join and communicate together.</p>
         </div>
-        
+
         <div class="security-point">
-          <h3><i class="fas fa-key"></i> ENCRYPTED PASSWORDS</h3>
-          <p>Room passwords are SHA-256 hashed. No plain text passwords are ever stored on the server.</p>
+          <h3><i class="fas fa-comment-dots"></i> FGRAM CHAT</h3>
+          <p>Use fgram chat to send quick messages to everyone in the room.</p>
         </div>
-        
+
         <div class="security-point">
-          <h3><i class="fas fa-trash-alt"></i> AUTO-FILE DELETION</h3>
-          <p>All uploaded files are permanently deleted when the room is closed or after 24 hours of inactivity.</p>
+          <h3><i class="fas fa-phone-volume"></i> VOICE CALLS</h3>
+          <p>Join a voice call in the room for live conversation. You can mute your microphone or deafen audio at any time.</p>
         </div>
-        
-        <div class="warning-box">
-          <h3><i class="fas fa-exclamation-triangle"></i> IMPORTANT WARNINGS</h3>
-          <p>• Files in room are accessible to all users<br>
-             • Don't share personal information<br>
-             • Use strong, unique passwords!<br>
+
+        <div class="security-point">
+          <h3><i class="fas fa-image"></i> IMAGE SHARING</h3>
+          <p>Send images and files in the room so participants can view shared content in one place.</p>
         </div>
-        
+
         <div class="repo-info">
           <p><i class="fab fa-github"></i> Open Source: <a href="https://github.com/badover/FreeGram" target="_blank" class="neon-blue">github.com/badover/FreeGram</a></p>
         </div>
@@ -182,6 +182,7 @@
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
+  <script src="vendor/mediasoup-client.bundle.js"></script>
   <script src="client.js"></script>
 </body>
 </html>
