@@ -3,6 +3,8 @@
 
 
 **FreeGram** is an open-source web messenger designed for anonymous communication without registration, tracking, or personal data collection.
+[![Our twitter](<img width="980" height="980" alt="image" src="https://github.com/user-attachments/assets/62749fe2-580d-48ff-9380-035e67add98e" />)](https://x.com/FreeGramMedia)
+
 
 The server does not log any information about users or their activity.  
 FreeGram does not use any database, which means message history is never stored.
