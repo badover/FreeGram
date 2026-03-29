@@ -51,6 +51,69 @@ let voiceParticipants = new Map();
 let voiceNeedsUnlock = false;
 let voiceUnlockHintShown = false;
 
+const MAX_UPLOAD_SIZE = 50 * 1024 * 1024;
+const MAX_CHAT_LENGTH = 4000;
+
+function normalizeUploadMime(file) {
+  if (file && typeof file.type === "string" && file.type.trim()) {
+    return file.type.trim();
+  }
+  return "application/octet-stream";
+}
+
+function isPreviewableImage(fileType) {
+  return typeof fileType === "string" &&
+    /^image\/(jpeg|jpg|png|gif|webp)$/i.test(fileType);
+}
+
+function getFileEmoji(fileType = "", fileName = "") {
+  const normalizedType = String(fileType).toLowerCase();
+  const ext = (fileName.split(".").pop() || "").toLowerCase();
+
+  if (normalizedType.startsWith("image/")) return "📸";
+  if (normalizedType.startsWith("video/")) return "🎥";
+  if (normalizedType.startsWith("audio/")) return "🎵";
+  if (normalizedType.includes("pdf") || ext === "pdf") return "📄";
+  if (/(zip|rar|7z|tar|gz)/.test(normalizedType) || ["zip", "rar", "7z", "tar", "gz"].includes(ext)) return "🗜️";
+  if (/(json|xml|javascript|typescript|shellscript|x-sh|html|css|csv|plain)/.test(normalizedType) || ["js", "ts", "json", "xml", "html", "css", "sh", "txt", "md", "csv"].includes(ext)) return "🧾";
+  return "📎";
+}
+
+function buildThumbnailAndSend(file, fileData) {
+  if (!isPreviewableImage(file.type)) {
+    sendMediaToServer(file, fileData, null);
+    return;
+  }
+
+  const img = new Image();
+  img.onload = function() {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = 150;
+    canvas.height = 150;
+    ctx.drawImage(img, 0, 0, 150, 150);
+    const thumbnail = canvas.toDataURL('image/jpeg', 0.7);
+    sendMediaToServer(file, fileData, thumbnail);
+  };
+  img.onerror = function() {
+    sendMediaToServer(file, fileData, null);
+  };
+  img.src = `data:${normalizeUploadMime(file)};base64,${fileData}`;
+}
+
+function resizeChatInput() {
+  if (!chatInput) return;
+  chatInput.style.height = "auto";
+  chatInput.style.height = `${Math.min(chatInput.scrollHeight, 180)}px`;
+}
+
+function normalizeOutgoingMessage(value) {
+  return String(value || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .trim();
+}
+
 
 if (createRoomBtn) {
   createRoomBtn.addEventListener("click", () => {
@@ -98,6 +161,7 @@ if (joinRoomBtn) {
 
 if (chatInput) {
     chatInput.addEventListener('input', () => {
+        resizeChatInput();
         if (chatInput.value.trim().length > 0) {
             if (!isTyping) {
                 isTyping = true;
@@ -131,6 +195,10 @@ if (chatInput) {
             isTyping = false;
             socket.emit('stopTyping');
         }
+    });
+
+    chatInput.addEventListener("paste", () => {
+      requestAnimationFrame(resizeChatInput);
     });
 }
 
@@ -391,86 +459,108 @@ socket.on("updateUserCount", (data) => {
 });
 
 sendBtn.addEventListener("click", sendMessage);
-chatInput.addEventListener("keypress", (e) => {
-  if (e.key === "Enter") sendMessage();
+chatInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
 });
 
 function sendMessage() {
-  const msg = chatInput.value.trim();
+  const msg = normalizeOutgoingMessage(chatInput.value);
   if (!msg) return;
+  if (msg.length > MAX_CHAT_LENGTH) {
+    addSystemMessage(`>>> Message too long (${msg.length}/${MAX_CHAT_LENGTH})`);
+    return;
+  }
 
   socket.emit("chatMessage", msg);
   chatInput.value = "";
+  resizeChatInput();
 }
 
 function createMediaUploadButton() {
-  const fileInput = document.createElement('input');
-  fileInput.type = 'file';
-  fileInput.id = 'mediaUploadInput';
-  fileInput.accept = 'image/*,video/*';
-  fileInput.multiple = false;
-  fileInput.style.display = 'none';
-  document.body.appendChild(fileInput);
-  
-  let uploadBtn = document.getElementById('mediaUploadBtn');
-  
-  if (!uploadBtn) {
-    uploadBtn = document.createElement('button');
-    uploadBtn.id = 'mediaUploadBtn';
-    uploadBtn.innerHTML = '📸';
-    uploadBtn.title = 'Upload photo/video (max 50MB)';
-    uploadBtn.style.cssText = `
-      background: var(--neon-blue);
-      color: black;
-      border: none;
-      border-radius: 4px;
-      padding: 12px 16px;
-      cursor: pointer;
-      font-size: 18px;
-      margin-left: 10px;
-      transition: all 0.3s;
-    `;
-    
-    uploadBtn.addEventListener('mouseover', () => {
-      uploadBtn.style.background = 'var(--neon-green)';
-      uploadBtn.style.transform = 'scale(1.05)';
+  let mediaInput = document.getElementById('mediaUploadInput');
+  if (!mediaInput) {
+    mediaInput = document.createElement('input');
+    mediaInput.type = 'file';
+    mediaInput.id = 'mediaUploadInput';
+    mediaInput.accept = 'image/*,video/*';
+    mediaInput.multiple = false;
+    mediaInput.style.display = 'none';
+    document.body.appendChild(mediaInput);
+  }
+
+  let fileInput = document.getElementById('fileUploadInput');
+  if (!fileInput) {
+    fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.id = 'fileUploadInput';
+    fileInput.accept = '*/*';
+    fileInput.multiple = false;
+    fileInput.style.display = 'none';
+    document.body.appendChild(fileInput);
+  }
+
+  const inputWrapper = document.querySelector('.input-wrapper');
+  if (!inputWrapper) return;
+
+  let mediaBtn = document.getElementById('mediaUploadBtn');
+  if (!mediaBtn) {
+    mediaBtn = document.createElement('button');
+    mediaBtn.id = 'mediaUploadBtn';
+    mediaBtn.type = 'button';
+    mediaBtn.className = 'upload-action-btn';
+    mediaBtn.innerHTML = '<span aria-hidden="true">📸</span>';
+    mediaBtn.title = 'Upload photo or video';
+    mediaBtn.setAttribute('aria-label', 'Upload photo or video');
+    mediaBtn.addEventListener('click', () => {
+      mediaInput.click();
     });
-    
-    uploadBtn.addEventListener('mouseout', () => {
-      uploadBtn.style.background = 'var(--neon-blue)';
-      uploadBtn.style.transform = 'scale(1)';
-    });
-    
-    uploadBtn.addEventListener('click', () => {
+    inputWrapper.appendChild(mediaBtn);
+  }
+
+  let fileBtn = document.getElementById('fileUploadBtn');
+  if (!fileBtn) {
+    fileBtn = document.createElement('button');
+    fileBtn.id = 'fileUploadBtn';
+    fileBtn.type = 'button';
+    fileBtn.className = 'upload-action-btn upload-action-btn-file';
+    fileBtn.innerHTML = '<span aria-hidden="true">📎</span>';
+    fileBtn.title = 'Upload any file';
+    fileBtn.setAttribute('aria-label', 'Upload file');
+    fileBtn.addEventListener('click', () => {
       fileInput.click();
     });
-    
-    const inputWrapper = document.querySelector('.input-wrapper');
-    if (inputWrapper) {
-      inputWrapper.appendChild(uploadBtn);
-    }
+    inputWrapper.appendChild(fileBtn);
   }
-  
-  fileInput.addEventListener('change', (e) => {
-    if (fileInput.files.length > 0) {
-      uploadMedia(fileInput.files[0]);
-      fileInput.value = '';
-    }
-  });
+
+  if (!mediaInput.dataset.bound) {
+    mediaInput.addEventListener('change', () => {
+      if (mediaInput.files.length > 0) {
+        uploadMedia(mediaInput.files[0]);
+        mediaInput.value = '';
+      }
+    });
+    mediaInput.dataset.bound = 'true';
+  }
+
+  if (!fileInput.dataset.bound) {
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files.length > 0) {
+        uploadMedia(fileInput.files[0]);
+        fileInput.value = '';
+      }
+    });
+    fileInput.dataset.bound = 'true';
+  }
 }
 
 function uploadMedia(file) {
   if (!file) return;
   
-  if (file.size > 50 * 1024 * 1024) {
+  if (file.size > MAX_UPLOAD_SIZE) {
     alert("File is too large (max 50MB)");
-    return;
-  }
-  
-  const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 
-                        'video/mp4', 'video/webm', 'video/quicktime'];
-  if (!allowedTypes.includes(file.type)) {
-    alert("Only images and videos are allowed");
     return;
   }
   
@@ -478,23 +568,7 @@ function uploadMedia(file) {
   
   reader.onload = function(e) {
     const fileData = e.target.result.split(',')[1];
-    let thumbnail = null;
-    
-    if (file.type.startsWith('image/')) {
-      const img = new Image();
-      img.onload = function() {
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-        canvas.width = 150;
-        canvas.height = 150;
-        ctx.drawImage(img, 0, 0, 150, 150);
-        thumbnail = canvas.toDataURL('image/jpeg', 0.7);
-        sendMediaToServer(file, fileData, thumbnail);
-      };
-      img.src = e.target.result;
-    } else {
-      sendMediaToServer(file, fileData, null);
-    }
+    buildThumbnailAndSend(file, fileData);
   };
   
   reader.onerror = (error) => {
@@ -510,11 +584,11 @@ function sendMediaToServer(file, fileData, thumbnail) {
   
   const fileInfo = {
     fileName: file.name,
-    fileType: file.type,
+    fileType: normalizeUploadMime(file),
     fileSize: file.size,
     fileData: fileData,
     thumbnail: thumbnail,
-    metadataStripped: true
+    metadataStripped: isPreviewableImage(file.type) || file.type.startsWith('video/')
   };
   
   socket.emit("uploadMedia", fileInfo);
@@ -588,14 +662,25 @@ function addMediaMessage(data) {
     mediaContent = `
       <div class="media-preview">
         <video controls class="media-video">
-          <source src="${data.fileUrl}" type="${escapeHtml(data.fileType)}">
+          <source src="${safeMediaURL(data.fileUrl)}" type="${escapeHtml(data.fileType)}">
           Your browser does not support video tag.
         </video>
         <div class="media-info">
           <strong>🎥 ${escapeHtml(data.fileName)}</strong>
           <small>${fileSize}</small>
           ${data.metadataStripped ? '<div class="file-warning"><i class="fas fa-check-circle"></i> METADATA REMOVED</div>' : ''}
-          <a href="${data.fileUrl}" download="${escapeHtml(data.fileName)}" class="download-link">⬇ Download</a>
+          <a href="${safeMediaURL(data.fileUrl)}" download="${escapeHtml(data.fileName)}" class="download-link">⬇ Download</a>
+        </div>
+      </div>
+    `;
+  } else {
+    mediaContent = `
+      <div class="media-preview media-preview-file">
+        <div class="media-file-icon" aria-hidden="true">${getFileEmoji(data.fileType, data.fileName)}</div>
+        <div class="media-info">
+          <strong>${getFileEmoji(data.fileType, data.fileName)} ${escapeHtml(data.fileName)}</strong>
+          <small>${fileSize}${data.fileType ? ` • ${escapeHtml(data.fileType)}` : ''}</small>
+          <a href="${safeMediaURL(data.fileUrl)}" download="${escapeHtml(data.fileName)}" class="download-link">⬇ Download</a>
         </div>
       </div>
     `;
@@ -822,12 +907,10 @@ function hideDragIndicator() {
 
 
 function processDroppedFiles(files) {
-    const validFiles = Array.from(files).filter(file => 
-        file.type.startsWith('image/') || file.type.startsWith('video/')
-    );
+    const validFiles = Array.from(files).filter(file => file instanceof File);
     
     if (validFiles.length === 0) {
-        addSystemMessage('>>> Only images and videos are supported');
+        addSystemMessage('>>> No valid files detected');
         return;
     }
     
@@ -847,15 +930,8 @@ function uploadMedia(file) {
     if (!file) return;
     addUploadNotification(file);
     
-    if (file.size > 50 * 1024 * 1024) {
+    if (file.size > MAX_UPLOAD_SIZE) {
         alert("File is too large (max 50MB)");
-        return;
-    }
-    
-    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 
-                          'video/mp4', 'video/webm', 'video/quicktime'];
-    if (!allowedTypes.includes(file.type)) {
-        alert("Only images and videos are allowed");
         return;
     }
     
@@ -863,23 +939,7 @@ function uploadMedia(file) {
     
     reader.onload = function(e) {
         const fileData = e.target.result.split(',')[1];
-        let thumbnail = null;
-        
-        if (file.type.startsWith('image/')) {
-            const img = new Image();
-            img.onload = function() {
-                const canvas = document.createElement('canvas');
-                const ctx = canvas.getContext('2d');
-                canvas.width = 150;
-                canvas.height = 150;
-                ctx.drawImage(img, 0, 0, 150, 150);
-                thumbnail = canvas.toDataURL('image/jpeg', 0.7);
-                sendMediaToServer(file, fileData, thumbnail);
-            };
-            img.src = e.target.result;
-        } else {
-            sendMediaToServer(file, fileData, null);
-        }
+        buildThumbnailAndSend(file, fileData);
     };
     
     reader.onerror = (error) => {
@@ -1367,8 +1427,13 @@ function handleEscapeKey(e) {
         document.body.style.cursor = '';
         
         const fileInput = document.getElementById('mediaUploadInput');
+        const genericFileInput = document.getElementById('fileUploadInput');
         if (fileInput && document.activeElement === fileInput) {
             fileInput.value = '';
+            chatInput.focus();
+        }
+        if (genericFileInput && document.activeElement === genericFileInput) {
+            genericFileInput.value = '';
             chatInput.focus();
         }
     }
@@ -1508,6 +1573,7 @@ window.addEventListener("DOMContentLoaded", () => {
   roomInput.value = "";
   passwordInput.value = "";
   resetVoiceStateUI();
+  resizeChatInput();
   
   nicknameInput.focus();
 });

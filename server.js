@@ -16,7 +16,7 @@ const io = new Server(server, {
   maxHttpBufferSize: 100e6
 });
 
-const MAX_MSG_LEN = 500;
+const MAX_MSG_LEN = 4000;
 const MAX_NICK_LEN = 20;
 const MAX_ROOM_LEN = 30;
 const MAX_PASSWORD_LEN = 64;
@@ -60,8 +60,32 @@ const apiLimiter = rateLimit({
 
 const rooms = {};
 const roomFiles = {}; 
+const uploadedFiles = Object.create(null);
 let mediasoupWorker = null;
 let effectiveAnnouncedIp = process.env.WEBRTC_ANNOUNCED_IP || undefined;
+
+function sanitizeUploadName(fileName) {
+  if (typeof fileName !== "string") return "file";
+  const normalized = path.basename(fileName).replace(/[^\w.\-() ]+/g, "_").trim();
+  return normalized || "file";
+}
+
+function getStoredFileExtension(fileName, fileType) {
+  const typeExt = ALLOWED_TYPES[fileType];
+  if (typeExt) return typeExt;
+
+  const rawExt = path.extname(fileName || "").slice(1).toLowerCase();
+  if (rawExt && /^[a-z0-9]{1,16}$/.test(rawExt)) return rawExt;
+
+  return "bin";
+}
+
+function isInlineUpload(fileType) {
+  return typeof fileType === "string" && (
+    fileType.startsWith("image/") ||
+    fileType.startsWith("video/")
+  );
+}
 
 function detectLocalIPv4() {
   const interfaces = os.networkInterfaces();
@@ -166,6 +190,7 @@ function emitVoiceParticipants(roomName) {
     speaking: !!state.speaking
   }));
 
+  // Voice roster is visible to everyone in the chat room, not only connected voice peers.
   io.to(roomName).emit("voiceParticipants", { participants });
 }
 
@@ -216,6 +241,7 @@ function deleteRoomFiles(roomName) {
           console.error(`✗ Error deleting ${fileName}:`, err);
         }
       }
+      delete uploadedFiles[fileName];
     });
     delete roomFiles[roomName];
   }
@@ -715,20 +741,15 @@ io.on("connection", (socket) => {
         return;
       }
     
-      if (!ALLOWED_TYPES[fileType]) {
-        console.error('Invalid file type:', fileType);
-        socket.emit("mediaError", "File type not allowed. Only images and videos.");
-        return;
-      }
-
-      if (!fileData || fileData.length < 100) {
+      if (!fileData || fileData.length < 4) {
         console.error('Invalid file data length:', fileData?.length);
         socket.emit("mediaError", "Invalid file data");
         return;
       }
 
    
-      const fileExt = ALLOWED_TYPES[fileType];
+      const sanitizedFileName = sanitizeUploadName(fileName);
+      const fileExt = getStoredFileExtension(sanitizedFileName, fileType);
       const uniqueName = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}.${fileExt}`;
       const filePath = path.join(UPLOADS_DIR, uniqueName);
       
@@ -749,9 +770,9 @@ io.on("connection", (socket) => {
         return;
       }
       
-      if (!buffer || buffer.length < 100) {
+      if (!buffer || buffer.length === 0) {
         console.error('Buffer too small:', buffer?.length);
-        socket.emit("mediaError", "File data too small");
+        socket.emit("mediaError", "File data is empty");
         return;
       }
       
@@ -764,20 +785,27 @@ io.on("connection", (socket) => {
         
         // console.log('File saved successfully');
         
-        
+        const inlinePreview = isInlineUpload(fileType);
+        uploadedFiles[uniqueName] = {
+          originalName: sanitizedFileName.substring(0, 100),
+          mimeType: typeof fileType === "string" ? fileType : "application/octet-stream",
+          inlinePreview
+        };
+
         const mediaMsg = {
           type: "media",
-          fileName: fileName.substring(0, 100),
+          fileName: sanitizedFileName.substring(0, 100),
           fileUrl: `/uploads/${uniqueName}`,
           fileType: fileType,
           fileSize: fileSize,
-          thumbnail: data.thumbnail || null,
-          isImage: fileType.startsWith('image/'),
-          isVideo: fileType.startsWith('video/'),
+          thumbnail: inlinePreview && fileType.startsWith('image/') ? thumbnail || null : null,
+          isImage: typeof fileType === "string" && fileType.startsWith('image/'),
+          isVideo: typeof fileType === "string" && fileType.startsWith('video/'),
+          isGenericFile: !(typeof fileType === "string" && (fileType.startsWith('image/') || fileType.startsWith('video/'))),
           nickname: socket.nickname,
           time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           self: false,
-          metadataStripped: true 
+          metadataStripped: inlinePreview 
         };
 
         // console.log('Sending media message to room:', socket.room);
@@ -870,11 +898,28 @@ io.on("connection", (socket) => {
 
 
 app.get('/uploads/:filename', (req, res) => {
-  const filePath = path.join(UPLOADS_DIR, req.params.filename);
+  const requestedFile = path.basename(req.params.filename || "");
+  if (!requestedFile || requestedFile !== req.params.filename) {
+    res.status(400).send('Invalid file name');
+    return;
+  }
+
+  const filePath = path.join(UPLOADS_DIR, requestedFile);
+  const meta = uploadedFiles[requestedFile];
   
   // console.log('File request:', req.params.filename);
   
   if (fs.existsSync(filePath)) {
+    if (meta?.mimeType) {
+      res.type(meta.mimeType);
+    }
+
+    if (!meta?.inlinePreview) {
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${(meta?.originalName || requestedFile).replace(/"/g, "")}"`
+      );
+    }
     res.sendFile(filePath);
   } else {
     console.error(`File not found: ${req.params.filename}`);
