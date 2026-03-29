@@ -4,6 +4,9 @@
 
 **FreeGram** is an open-source web messenger designed for anonymous communication without registration, tracking, or personal data collection.
 
+[[Our twitter]](https://x.com/FreeGramMedia)
+
+
 The server does not log any information about users or their activity.  
 FreeGram does not use any database, which means message history is never stored.
 
@@ -15,7 +18,7 @@ FreeGram allows users to create temporary chat rooms using any login and passwor
 
 Room credentials can be securely shared with friends.  
 Each room is an isolated and private space where participants can exchange messages in real time.
-**In rooms you can send messages, videos, photos.** *In the future you can make videocalls, send voicemessages and other type of files.*
+**In rooms you can send messages, videos, photos, talk with your friends in audio-calls and all this without any logs.**
 
 Rooms are ephemeral and exist only while they are actively used.
 
@@ -43,6 +46,7 @@ Our team believe that every person has right for privacy. Many messengers nowada
 Contributions are welcome.
 
 You can help by:
+- Doing pull requests 
 - Reporting issues  
 - Suggesting improvements  
 
