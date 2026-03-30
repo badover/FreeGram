@@ -43,6 +43,8 @@ let voiceProducer = null;
 let voiceConsumers = new Map();
 let voiceAudioElements = new Map();
 let voiceConsumeQueue = new Set();
+let voiceProducerOwners = new Map();
+let voiceUserVolumes = new Map();
 let voiceVadContext = null;
 let voiceVadAnalyser = null;
 let voiceVadTimer = null;
@@ -50,9 +52,11 @@ let voiceSpeaking = false;
 let voiceParticipants = new Map();
 let voiceNeedsUnlock = false;
 let voiceUnlockHintShown = false;
+let voiceContextMenu = null;
 
 const MAX_UPLOAD_SIZE = 50 * 1024 * 1024;
 const MAX_CHAT_LENGTH = 4000;
+const DEFAULT_VOICE_USER_VOLUME = 100;
 
 function normalizeUploadMime(file) {
   if (file && typeof file.type === "string" && file.type.trim()) {
@@ -237,6 +241,7 @@ function updateTypingIndicator() {
     }
     
     const currentIndicator = document.getElementById('typingIndicator');
+    updateTypingIndicatorPosition();
     
     if (typingUsers.size === 0) {
         currentIndicator.style.display = 'none';
@@ -266,13 +271,24 @@ function updateTypingIndicator() {
     currentIndicator.style.display = 'flex';
 }
 
+function updateTypingIndicatorPosition() {
+    const indicator = document.getElementById('typingIndicator');
+    if (!indicator) return;
+
+    const inputPanel = document.querySelector('.input-panel');
+    const voicePanel = document.querySelector('.voice-panel');
+    const bottomOffset = (inputPanel?.offsetHeight || 0) + (voicePanel?.offsetHeight || 0) + 12;
+
+    indicator.style.bottom = `${bottomOffset}px`;
+}
+
 function createTypingIndicator() {
     const indicator = document.createElement('div');
     indicator.id = 'typingIndicator';
     indicator.className = 'typing-indicator';
     indicator.style.cssText = `
         position: absolute;
-        bottom: 70px;
+        bottom: 120px;
         left: 50%;
         transform: translateX(-50%);
         background: rgba(5, 5, 15, 0.95);
@@ -300,6 +316,7 @@ function createTypingIndicator() {
     if (chatContainer) {
         chatContainer.appendChild(indicator);
     }
+    updateTypingIndicatorPosition();
 }
 
 if (githubBtn) {
@@ -973,8 +990,110 @@ function resetVoiceStateUI() {
   voiceSpeaking = false;
   voiceParticipants.clear();
   voiceConsumeQueue.clear();
+  voiceProducerOwners.clear();
   renderVoiceParticipants();
   updateVoiceButtons();
+}
+
+function getVoiceUserVolume(socketId) {
+  const storedVolume = voiceUserVolumes.get(socketId);
+  return Number.isFinite(storedVolume) ? storedVolume : DEFAULT_VOICE_USER_VOLUME;
+}
+
+function setVoiceUserVolume(socketId, value) {
+  if (!socketId) return;
+  const normalizedValue = Math.max(0, Math.min(200, Number(value) || 0));
+  voiceUserVolumes.set(socketId, normalizedValue);
+  applyVoiceUserVolume(socketId);
+  return normalizedValue;
+}
+
+function formatVoiceVolumeLabel(value) {
+  return `${Math.max(0, Math.min(200, Math.round(Number(value) || 0)))}%`;
+}
+
+function syncVoiceVolumeDisplay(socketId, sliderEl, valueEl, nextValue) {
+  const normalizedValue = setVoiceUserVolume(socketId, nextValue);
+  if (sliderEl) {
+    sliderEl.value = String(normalizedValue);
+  }
+  if (valueEl) {
+    valueEl.textContent = formatVoiceVolumeLabel(normalizedValue);
+  }
+}
+
+function applyVoiceUserVolume(socketId) {
+  if (!socketId) return;
+
+  const volume = getVoiceUserVolume(socketId) / 100;
+  for (const [producerId, audioEl] of voiceAudioElements.entries()) {
+    if (voiceProducerOwners.get(producerId) !== socketId) continue;
+    audioEl.volume = volume;
+  }
+}
+
+function closeVoiceContextMenu() {
+  if (!voiceContextMenu) return;
+  voiceContextMenu.remove();
+  voiceContextMenu = null;
+}
+
+function openVoiceContextMenu(participant, clientX, clientY) {
+  if (!participant || !participant.socketId || participant.socketId === socket.id) return;
+
+  closeVoiceContextMenu();
+
+  const menu = document.createElement("div");
+  menu.className = "voice-context-menu";
+
+  const title = document.createElement("div");
+  title.className = "voice-context-title";
+  title.textContent = participant.nickname;
+
+  const volumeRow = document.createElement("label");
+  volumeRow.className = "voice-context-volume";
+
+  const volumeLabel = document.createElement("span");
+  volumeLabel.className = "voice-context-label";
+  volumeLabel.textContent = "Volume";
+
+  const volumeSlider = document.createElement("input");
+  volumeSlider.className = "voice-context-slider";
+  volumeSlider.type = "range";
+  volumeSlider.min = "0";
+  volumeSlider.max = "200";
+  volumeSlider.step = "1";
+  volumeSlider.value = String(getVoiceUserVolume(participant.socketId));
+
+  const handleVolumeChange = (event) => {
+    syncVoiceVolumeDisplay(
+      participant.socketId,
+      volumeSlider,
+      null,
+      event.target.valueAsNumber
+    );
+  };
+
+  volumeSlider.addEventListener("input", handleVolumeChange);
+  volumeSlider.addEventListener("change", handleVolumeChange);
+  volumeSlider.addEventListener("pointerup", handleVolumeChange);
+
+  volumeRow.appendChild(volumeLabel);
+  volumeRow.appendChild(volumeSlider);
+
+  menu.appendChild(title);
+  menu.appendChild(volumeRow);
+  document.body.appendChild(menu);
+
+  const { innerWidth, innerHeight } = window;
+  const rect = menu.getBoundingClientRect();
+  const left = Math.min(clientX, innerWidth - rect.width - 12);
+  const top = Math.min(clientY, innerHeight - rect.height - 12);
+
+  menu.style.left = `${Math.max(12, left)}px`;
+  menu.style.top = `${Math.max(12, top)}px`;
+
+  voiceContextMenu = menu;
 }
 
 function updateVoiceButtons() {
@@ -1012,6 +1131,7 @@ function renderVoiceParticipants() {
   voiceUsersList.innerHTML = "";
 
   if (voiceParticipants.size === 0) {
+    closeVoiceContextMenu();
     const empty = document.createElement("div");
     empty.className = "voice-user voice-empty";
     empty.textContent = "No one in voice";
@@ -1023,12 +1143,37 @@ function renderVoiceParticipants() {
     const item = document.createElement("div");
     item.className = "voice-user";
     if (voiceJoined && participant.speaking) item.classList.add("speaking");
+    if (participant.socketId === socket.id) item.classList.add("voice-user-self");
+    if (participant.socketId !== socket.id) {
+      item.classList.add("voice-user-adjustable");
+      item.title = "Right click to adjust volume";
+      item.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        openVoiceContextMenu(participant, event.clientX, event.clientY);
+      });
+    }
 
     const flags = [];
     if (participant.muted) flags.push("MUTED");
     if (participant.deafened) flags.push("DEAF");
 
-    item.textContent = `${participant.nickname}${participant.socketId === socket.id ? " [YOU]" : ""}${flags.length ? ` (${flags.join(", ")})` : ""}`;
+    const header = document.createElement("div");
+    header.className = "voice-user-meta";
+
+    const name = document.createElement("span");
+    name.className = "voice-user-name";
+    name.textContent = `${participant.nickname}${participant.socketId === socket.id ? " [YOU]" : ""}`;
+    header.appendChild(name);
+
+    if (flags.length > 0) {
+      const status = document.createElement("span");
+      status.className = "voice-user-flags";
+      status.textContent = flags.join(" · ");
+      header.appendChild(status);
+    }
+
+    item.appendChild(header);
+
     voiceUsersList.appendChild(item);
   }
 }
@@ -1104,6 +1249,7 @@ function cleanupConsumer(producerId) {
 
   voiceConsumers.delete(producerId);
   voiceAudioElements.delete(producerId);
+  voiceProducerOwners.delete(producerId);
 }
 
 function tryPlayRemoteAudio(audioEl) {
@@ -1157,6 +1303,10 @@ async function consumeProducer(producerId) {
     audioEl.playsInline = true;
     audioEl.srcObject = stream;
     audioEl.muted = !!voiceDeafened;
+    const ownerSocketId = voiceProducerOwners.get(producerId);
+    if (ownerSocketId) {
+      audioEl.volume = getVoiceUserVolume(ownerSocketId) / 100;
+    }
     audioEl.style.display = "none";
     document.body.appendChild(audioEl);
     tryPlayRemoteAudio(audioEl);
@@ -1254,6 +1404,9 @@ async function joinVoiceChannel() {
     addSystemMessage(">>> Voice connected");
 
     for (const producerInfo of (joinData.existingProducers || [])) {
+      if (producerInfo?.producerId && producerInfo?.socketId) {
+        voiceProducerOwners.set(producerInfo.producerId, producerInfo.socketId);
+      }
       await consumeProducer(producerInfo.producerId);
     }
   } catch (error) {
@@ -1303,6 +1456,7 @@ function leaveVoiceChannel(notifyServer) {
   voiceConsumeQueue.clear();
   voiceConsumers.clear();
   voiceAudioElements.clear();
+  voiceProducerOwners.clear();
 
   renderVoiceParticipants();
   updateVoiceButtons();
@@ -1395,14 +1549,22 @@ socket.on("voiceParticipants", ({ participants } = {}) => {
 
 socket.on("voiceUserLeft", ({ socketId } = {}) => {
   if (!socketId) return;
+  for (const [producerId, ownerSocketId] of voiceProducerOwners.entries()) {
+    if (ownerSocketId === socketId) {
+      voiceProducerOwners.delete(producerId);
+    }
+  }
 });
 
 socket.on("voiceRoomClosed", () => {
   leaveVoiceChannel(false);
 });
 
-socket.on("voiceNewProducer", ({ producerId } = {}) => {
+socket.on("voiceNewProducer", ({ producerId, socketId } = {}) => {
   if (!voiceJoined || !producerId) return;
+  if (socketId) {
+    voiceProducerOwners.set(producerId, socketId);
+  }
   consumeProducer(producerId).catch((error) => {
     console.error("voiceNewProducer consume error:", error);
   });
@@ -1421,6 +1583,7 @@ document.addEventListener('keydown', handleEscapeKey);
 
 function handleEscapeKey(e) {
     if (e.key === 'Escape') {
+        closeVoiceContextMenu();
         closeFullImageModal();
         hideSafetyModal();
         hideDragIndicator();
@@ -1557,14 +1720,23 @@ function handleGlobalDrop(e) {
     }
 }
 
+function hasActiveTextSelection() {
+  const selection = window.getSelection();
+  return !!selection && !selection.isCollapsed && selection.toString().trim().length > 0;
+}
+
 messagesList.addEventListener("click", (e) => {
   if (!chatInput) return;
+  if (hasActiveTextSelection()) return;
 
   const interactiveTarget = e.target.closest(
     ".media-thumbnail, .view-link, .download-link, video, a, button, input, textarea"
   );
 
+  const messageContent = e.target.closest(".message-content, .media-info, .message-header");
+
   if (interactiveTarget) return;
+  if (messageContent) return;
   chatInput.focus();
 });
 
@@ -1587,3 +1759,9 @@ window.addEventListener("beforeunload", () => {
 
 document.addEventListener("click", unlockVoiceAudio, { passive: true });
 document.addEventListener("keydown", unlockVoiceAudio);
+document.addEventListener("click", (event) => {
+  if (!voiceContextMenu) return;
+  if (voiceContextMenu.contains(event.target)) return;
+  closeVoiceContextMenu();
+});
+window.addEventListener("resize", updateTypingIndicatorPosition);
