@@ -625,6 +625,7 @@ socket.on("chatMessage", (data) => {
 
 function addTextMessage(data) {
   const messageDiv = document.createElement("div");
+  const messageHtml = linkifyMessageText(data.msg);
   
   if (data.self) {
     messageDiv.className = "message-self";
@@ -633,7 +634,7 @@ function addTextMessage(data) {
         <span class="message-nickname">${data.nickname}</span>
         <span class="message-time">${data.time}</span>
       </div>
-      <div class="message-content">${escapeHtml(data.msg)}</div>
+      <div class="message-content">${messageHtml}</div>
     `;
   } else {
     messageDiv.className = "message-other";
@@ -642,7 +643,7 @@ function addTextMessage(data) {
         <span class="message-nickname">${data.nickname}</span>
         <span class="message-time">${data.time}</span>
       </div>
-      <div class="message-content">${escapeHtml(data.msg)}</div>
+      <div class="message-content">${messageHtml}</div>
     `;
   }
   
@@ -712,6 +713,10 @@ function addMediaMessage(data) {
   `;
   
   messagesList.appendChild(messageDiv);
+  const zoomableMedia = messageDiv.querySelector(".media-thumbnail");
+  if (zoomableMedia) {
+    attachPreviewZoom(zoomableMedia);
+  }
   scrollToBottom();
 }
 
@@ -721,6 +726,51 @@ function formatFileSize(bytes) {
   const sizes = ['Bytes', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+function clampZoomLevel(value, min = 1, max = 4) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function setZoomOriginFromPointer(mediaEl, clientX, clientY) {
+  if (!mediaEl || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return;
+  const rect = mediaEl.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+
+  const x = ((clientX - rect.left) / rect.width) * 100;
+  const y = ((clientY - rect.top) / rect.height) * 100;
+  const clampedX = Math.min(100, Math.max(0, x));
+  const clampedY = Math.min(100, Math.max(0, y));
+
+  mediaEl.style.transformOrigin = `${clampedX}% ${clampedY}%`;
+}
+
+function applyPreviewZoom(mediaEl, zoom) {
+  if (!mediaEl) return;
+  const normalizedZoom = clampZoomLevel(zoom);
+  mediaEl.dataset.zoom = String(normalizedZoom);
+  mediaEl.style.transform = `scale(${normalizedZoom})`;
+}
+
+function attachPreviewZoom(mediaEl) {
+  if (!mediaEl || mediaEl.dataset.zoomBound === "true") return;
+
+  applyPreviewZoom(mediaEl, Number(mediaEl.dataset.zoom || 1));
+
+  mediaEl.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    setZoomOriginFromPointer(mediaEl, event.clientX, event.clientY);
+    const currentZoom = Number(mediaEl.dataset.zoom || 1);
+    const delta = event.deltaY < 0 ? 0.12 : -0.12;
+    applyPreviewZoom(mediaEl, currentZoom + delta);
+  }, { passive: false });
+
+  mediaEl.addEventListener("dblclick", (event) => {
+    event.preventDefault();
+    applyPreviewZoom(mediaEl, 1);
+  });
+
+  mediaEl.dataset.zoomBound = "true";
 }
 
 window.openFullImage = function(url) {
@@ -807,6 +857,47 @@ function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
+}
+
+function normalizeLinkHref(rawUrl) {
+  const trimmedUrl = String(rawUrl || "").trim();
+  if (!trimmedUrl) return null;
+  if (/^https?:\/\//i.test(trimmedUrl)) return trimmedUrl;
+  return `https://${trimmedUrl}`;
+}
+
+function trimTrailingLinkPunctuation(url) {
+  return String(url || "").replace(/[),.!?;:]+$/g, "");
+}
+
+function linkifyMessageText(text) {
+  const rawText = String(text || "");
+  const linkPattern = /(?:https?:\/\/[^\s]+|(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s]*)?)/gi;
+
+  let result = "";
+  let lastIndex = 0;
+
+  for (const match of rawText.matchAll(linkPattern)) {
+    const matchedText = match[0];
+    const matchIndex = match.index ?? 0;
+    const trimmedMatch = trimTrailingLinkPunctuation(matchedText);
+    const trailingText = matchedText.slice(trimmedMatch.length);
+    const href = normalizeLinkHref(trimmedMatch);
+
+    result += escapeHtml(rawText.slice(lastIndex, matchIndex));
+
+    if (href) {
+      result += `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" class="message-link">${escapeHtml(trimmedMatch)}</a>`;
+    } else {
+      result += escapeHtml(matchedText);
+    }
+
+    result += escapeHtml(trailingText);
+    lastIndex = matchIndex + matchedText.length;
+  }
+
+  result += escapeHtml(rawText.slice(lastIndex));
+  return result;
 }
 
 function scrollToBottom() {
@@ -1603,6 +1694,8 @@ function handleEscapeKey(e) {
 }
 
 window.openFullImage = function(url) {
+    closeFullImageModal();
+
     const modal = document.createElement('div');
     modal.className = 'image-modal';
     modal.style.cssText = `
@@ -1627,6 +1720,20 @@ window.openFullImage = function(url) {
         border: 2px solid var(--neon-blue);
         border-radius: 10px;
     `;
+    applyPreviewZoom(img, 1);
+
+    img.addEventListener("wheel", (event) => {
+        event.preventDefault();
+        setZoomOriginFromPointer(img, event.clientX, event.clientY);
+        const currentZoom = Number(img.dataset.zoom || 1);
+        const delta = event.deltaY < 0 ? 0.16 : -0.16;
+        applyPreviewZoom(img, currentZoom + delta);
+    }, { passive: false });
+
+    img.addEventListener("dblclick", (event) => {
+        event.preventDefault();
+        applyPreviewZoom(img, 1);
+    });
     
     const closeBtn = document.createElement('button');
     closeBtn.innerHTML = '✕';
@@ -1646,9 +1753,7 @@ window.openFullImage = function(url) {
         z-index: 10000;
     `;
     
-    closeBtn.addEventListener('click', () => {
-        document.body.removeChild(modal);
-    });
+    closeBtn.addEventListener('click', closeFullImageModal);
     
     modal.appendChild(img);
     modal.appendChild(closeBtn);
@@ -1656,7 +1761,7 @@ window.openFullImage = function(url) {
     
     modal.addEventListener('click', (e) => {
         if (e.target === modal) {
-            document.body.removeChild(modal);
+            closeFullImageModal();
         }
     });
     
@@ -1664,7 +1769,7 @@ window.openFullImage = function(url) {
 }
 
 function closeFullImageModal() {
-    const modal = document.querySelector('.image-modal');
+    const modal = window.currentImageModal || document.querySelector('.image-modal');
     if (modal) {
         document.body.removeChild(modal);
         window.currentImageModal = null;

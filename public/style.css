@@ -460,6 +460,16 @@ body {
   word-break: break-word;
 }
 
+.message-link {
+  color: var(--neon-blue);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.message-link:hover {
+  color: var(--neon-green);
+}
+
 .input-panel {
   background: rgba(0, 20, 40, 0.9);
   padding: 20px;
@@ -610,6 +620,7 @@ body {
   transition: transform 0.3s;
   object-fit: cover;
   touch-action: manipulation;
+  transform-origin: center center;
 }
 
 .media-thumbnail:hover {
@@ -624,6 +635,8 @@ body {
   border: 2px solid var(--neon-blue);
   background: black;
   display: block;
+  transform-origin: center center;
+  transition: transform 0.2s ease;
 }
 
 .media-info {
@@ -725,6 +738,8 @@ body {
   border: 3px solid var(--neon-blue);
   border-radius: 12px;
   box-shadow: 0 0 40px rgba(0, 243, 255, 0.5);
+  transform-origin: center center;
+  transition: transform 0.15s ease;
 }
 
 .image-modal button {
