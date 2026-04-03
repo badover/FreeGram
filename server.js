@@ -448,12 +448,13 @@ io.on("connection", (socket) => {
         }
 
         if (Object.keys(rooms[socket.room].users).length === 0) {
+          const roomToDelete = socket.room;
           setTimeout(() => {
-            if (rooms[socket.room] && Object.keys(rooms[socket.room].users).length === 0) {
-              deleteRoomFiles(socket.room);
-              closeRoomVoice(socket.room);
-              delete rooms[socket.room];
-              console.log(`Room ${socket.room} deleted`);
+            if (rooms[roomToDelete] && Object.keys(rooms[roomToDelete].users).length === 0) {
+              deleteRoomFiles(roomToDelete);
+              closeRoomVoice(roomToDelete);
+              delete rooms[roomToDelete];
+              console.log(`Room ${roomToDelete} deleted`);
             }
           }, 300000); 
         }
