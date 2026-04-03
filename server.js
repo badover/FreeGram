@@ -22,6 +22,13 @@ const MAX_ROOM_LEN = 30;
 const MAX_PASSWORD_LEN = 64;
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 
+const MAX_CONNECTIONS = 100000;
+const MAX_USERS_PER_ROOM = 500;
+const MAX_ROOM_CREATIONS = 20; 
+const MAX_ROOM_CREATIONS_PERIOD = 10 * 60 * 1000; // 10 min
+const MAX_FILE_UPLOADS = 5; // per socket
+const MAX_FILE_UPLOADS_PERIOD = 30 * 1000; // 30 secs
+
 const SERVER_HOST = process.env.HOST || "0.0.0.0";
 const WEBRTC_LISTEN_IP = process.env.WEBRTC_LISTEN_IP || "0.0.0.0";
 const WEBRTC_MIN_PORT = Number(process.env.WEBRTC_MIN_PORT || 40000);
@@ -57,6 +64,50 @@ const apiLimiter = rateLimit({
     max: 100, 
     message: 'Too many requests'
 });
+
+class RateLimiter {
+  constructor(maxAttempts, periodMs) {
+    this.maxAttempts = maxAttempts;
+    this.periodMs = periodMs;
+    this.attempts = new Map();
+  }
+
+  isAllowed(key) {
+    const now = Date.now();
+    if (!this.attempts.has(key)) {
+      this.attempts.set(key, []);
+    }
+    
+    const timestamps = this.attempts.get(key);
+    while (timestamps.length > 0 && now - timestamps[0] > this.periodMs) {
+      timestamps.shift();
+    }
+    
+    if (timestamps.length < this.maxAttempts) {
+      timestamps.push(now);
+      return true;
+    }
+    return false;
+  }
+
+  getRemainingTime(key) {
+    const now = Date.now();
+    const timestamps = this.attempts.get(key);
+    if (!timestamps || timestamps.length === 0) return this.periodMs;
+    
+    while (timestamps.length > 0 && now - timestamps[0] > this.periodMs) {
+      timestamps.shift();
+    }
+    
+    if (timestamps.length < this.maxAttempts) return 0;
+    return Math.ceil((timestamps[0] + this.periodMs - now) / 1000);
+  }
+}
+
+const roomCreationLimiter = new RateLimiter(MAX_ROOM_CREATIONS, MAX_ROOM_CREATIONS_PERIOD);
+const fileUploadLimiter = new RateLimiter(MAX_FILE_UPLOADS, MAX_FILE_UPLOADS_PERIOD);
+
+let activeConnections = 0;
 
 const rooms = {};
 const roomFiles = {}; 
@@ -190,7 +241,6 @@ function emitVoiceParticipants(roomName) {
     speaking: !!state.speaking
   }));
 
-  // Voice roster is visible to everyone in the chat room, not only connected voice peers.
   io.to(roomName).emit("voiceParticipants", { participants });
 }
 
@@ -230,13 +280,11 @@ function hashPassword(password) {
 
 function deleteRoomFiles(roomName) {
   if (roomFiles[roomName]) {
-    // console.log(`Deleting ${roomFiles[roomName].length} files for room ${roomName}`);
     roomFiles[roomName].forEach(fileName => {
       const filePath = path.join(UPLOADS_DIR, fileName);
       if (fs.existsSync(filePath)) {
         try {
           fs.unlinkSync(filePath);
-          // console.log(`✓ Deleted: ${fileName}`);
         } catch (err) {
           console.error(`✗ Error deleting ${fileName}:`, err);
         }
@@ -263,8 +311,16 @@ function closeRoomVoice(roomName) {
 }
 
 io.on("connection", (socket) => {
+  activeConnections++;
+  if (activeConnections > MAX_CONNECTIONS) {
+    activeConnections--;
+    socket.emit("error", { code: "SERVER_FULL", message: "Server is at max capacity" });
+    socket.disconnect(true);
+    console.warn(`⚠️ Connection rejected: Server full (${activeConnections}/${MAX_CONNECTIONS})`);
+    return;
+  }
+
   socket.lastMsg = 0;
-  // console.log("User connected:", socket.id);
 
   socket.on("createRoom", ({ room, password, nickname }) => {
     room = sanitizeString(room, MAX_ROOM_LEN);
@@ -277,6 +333,13 @@ io.on("connection", (socket) => {
 
     if (rooms[room]) {
       socket.emit("roomError", "Room already exists");
+      return;
+    }
+
+    if (!roomCreationLimiter.isAllowed(socket.id)) {
+      const remainingWait = roomCreationLimiter.getRemainingTime(socket.id);
+      socket.emit("roomError", `Too many room creations. Try again in ${remainingWait}s`);
+      console.warn(`⚠️ Room creation rate limit: ${socket.nickname || 'Anonymous'} blocked for ${remainingWait}s`);
       return;
     }
 
@@ -312,7 +375,6 @@ io.on("connection", (socket) => {
 
   });
 
-  
   socket.on("joinRoom", ({ room, password, nickname }) => {
     room = sanitizeString(room, MAX_ROOM_LEN);
     nickname = sanitizeString(nickname || "Anonymous", MAX_NICK_LEN);
@@ -330,6 +392,12 @@ io.on("connection", (socket) => {
 
     if (roomData.password !== hashPassword(password)) {
       socket.emit("roomError", "Incorrect password");
+      return;
+    }
+
+    if (Object.keys(roomData.users).length >= MAX_USERS_PER_ROOM) {
+      socket.emit("roomError", `Room is full (max ${MAX_USERS_PER_ROOM} users)`);
+      console.warn(`⚠️ Room full: ${room} has reached max users (${MAX_USERS_PER_ROOM})`);
       return;
     }
 
@@ -351,10 +419,8 @@ io.on("connection", (socket) => {
     });
     emitVoiceParticipants(room);
 
-   
     socket.to(room).emit("userJoined", { nickname });
-    
-   
+
     io.to(room).emit("updateUserCount", {
       count: Object.keys(roomData.users).length
     });
@@ -380,10 +446,8 @@ io.on("connection", (socket) => {
             count: Object.keys(rooms[socket.room].users).length
           });
         }
-        
-      
+
         if (Object.keys(rooms[socket.room].users).length === 0) {
-          // console.log(`Room ${socket.room} is empty, scheduling deletion...`);
           setTimeout(() => {
             if (rooms[socket.room] && Object.keys(rooms[socket.room].users).length === 0) {
               deleteRoomFiles(socket.room);
@@ -413,8 +477,6 @@ io.on("connection", (socket) => {
       return;
     }
     
-    // console.log(`Closing room ${room} by ${socket.nickname}`);
-    
     io.to(room).emit("roomClosed", {
       reason: "host_closed",
       closedBy: socket.nickname
@@ -427,8 +489,6 @@ io.on("connection", (socket) => {
     deleteRoomFiles(room);
     delete rooms[room];
     io.in(room).socketsLeave(room);
-    
-    // console.log(`Room ${room} closed and files deleted`);
   });
 
   socket.on("voiceJoin", async (_, callback) => {
@@ -712,13 +772,16 @@ io.on("connection", (socket) => {
 
 
   socket.on("uploadMedia", (data) => {
-    // console.log('\n=== UPLOAD MEDIA STARTED ===');
-    // console.log('User:', socket.nickname);
-    // console.log('Room:', socket.room);
-    
     if (!socket.room || !rooms[socket.room]) {
       console.error('No room or user not in room');
       socket.emit("mediaError", "You are not in a room");
+      return;
+    }
+
+    if (!fileUploadLimiter.isAllowed(socket.id)) {
+      const remainingWait = fileUploadLimiter.getRemainingTime(socket.id);
+      socket.emit("mediaError", `Upload limit reached. Try again in ${remainingWait}s`);
+      console.warn(`⚠️ File upload rate limit: ${socket.nickname || 'Anonymous'} blocked for ${remainingWait}s`);
       return;
     }
 
@@ -753,8 +816,6 @@ io.on("connection", (socket) => {
       const uniqueName = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}.${fileExt}`;
       const filePath = path.join(UPLOADS_DIR, uniqueName);
       
-      // console.log('Saving to:', filePath);
-      
       if (!roomFiles[socket.room]) {
         roomFiles[socket.room] = [];
       }
@@ -763,7 +824,6 @@ io.on("connection", (socket) => {
       let buffer;
       try {
         buffer = Buffer.from(fileData, 'base64');
-        // console.log('Buffer created, size:', buffer.length);
       } catch (bufferError) {
         console.error('Buffer creation error:', bufferError);
         socket.emit("mediaError", "File data corrupted");
@@ -782,8 +842,6 @@ io.on("connection", (socket) => {
           socket.emit("mediaError", "Failed to save file");
           return;
         }
-        
-        // console.log('File saved successfully');
         
         const inlinePreview = isInlineUpload(fileType);
         uploadedFiles[uniqueName] = {
@@ -808,12 +866,8 @@ io.on("connection", (socket) => {
           metadataStripped: inlinePreview 
         };
 
-        // console.log('Sending media message to room:', socket.room);
-        
         socket.to(socket.room).emit("chatMessage", mediaMsg);
         socket.emit("chatMessage", { ...mediaMsg, self: true });
-
-        // console.log(`✓ Media uploaded successfully: ${fileName}\n`);
       });
 
     } catch (error) {
@@ -858,7 +912,10 @@ io.on("connection", (socket) => {
 
 
   socket.on("disconnect", () => {
-    // console.log("User disconnected:", socket.id);
+    activeConnections--;
+    
+    roomCreationLimiter.attempts.delete(socket.id);
+    fileUploadLimiter.attempts.delete(socket.id);
     
     if (socket.room && rooms[socket.room]) {
       leaveVoice(socket);
@@ -876,15 +933,10 @@ io.on("connection", (socket) => {
             count: Object.keys(rooms[socket.room].users).length
           });
         }
-        
-        // console.log(`Room ${socket.room} now has ${Object.keys(rooms[socket.room].users).length} users`);
-        
-        
+
         if (Object.keys(rooms[socket.room].users).length === 0) {
-          // console.log(`Room ${socket.room} is empty. Will delete in 5 minutes.`);
           setTimeout(() => {
             if (rooms[socket.room] && Object.keys(rooms[socket.room].users).length === 0) {
-              // console.log(`Deleting empty room ${socket.room}`);
               deleteRoomFiles(socket.room);
               closeRoomVoice(socket.room);
               delete rooms[socket.room];
@@ -906,8 +958,6 @@ app.get('/uploads/:filename', (req, res) => {
 
   const filePath = path.join(UPLOADS_DIR, requestedFile);
   const meta = uploadedFiles[requestedFile];
-  
-  // console.log('File request:', req.params.filename);
   
   if (fs.existsSync(filePath)) {
     if (meta?.mimeType) {
