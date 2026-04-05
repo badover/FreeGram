@@ -29,7 +29,7 @@ const MAX_ROOM_CREATIONS_PERIOD = 10 * 60 * 1000; // 10 min
 const MAX_FILE_UPLOADS = 5; // per socket
 const MAX_FILE_UPLOADS_PERIOD = 30 * 1000; // 30 secs
 
-const SERVER_HOST = process.env.HOST || "0.0.0.0";
+const SERVER_HOST = process.env.HOST || "127.0.0.1";
 const WEBRTC_LISTEN_IP = process.env.WEBRTC_LISTEN_IP || "0.0.0.0";
 const WEBRTC_MIN_PORT = Number(process.env.WEBRTC_MIN_PORT || 40000);
 const WEBRTC_MAX_PORT = Number(process.env.WEBRTC_MAX_PORT || 49999);
