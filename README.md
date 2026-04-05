@@ -4,7 +4,15 @@
 
 **FreeGram** is an open-source web messenger designed for anonymous communication without registration, tracking, or personal data collection.
 
-[[Our twitter]](https://x.com/FreeGramMedia)
+<p>
+  <a href="https://x.com/youngt1m">
+    <img src="https://img.shields.io/badge/Follow%20us%20on%20X-000000?style=for-the-badge&logo=x&logoColor=white" alt="Follow us on X (Twitter)" />
+  </a>
+  &nbsp;
+  <a href="https://discord.gg/TbKtP8F9cn">
+    <img src="https://img.shields.io/badge/Join%20our%20Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join our Discord" />
+  </a>
+</p>
 
 
 The server does not log any information about users or their activity.  
