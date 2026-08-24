@@ -40,9 +40,7 @@ const MAX_MSG_LEN = 4000;
 const MAX_NICK_LEN = 20;
 const MAX_ROOM_LEN = 30;
 const MAX_PASSWORD_LEN = 64;
-const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
-// Server-side limit must stay above the largest decoded chunk that the client can
-// legitimately send through Socket.IO base64 transport.
+const MAX_FILE_SIZE = 50 * 1024 * 1024;
 const MAX_CHUNK_BYTES = 2 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_IMAGE_DIMENSION = 1600;
@@ -50,9 +48,9 @@ const MAX_IMAGE_DIMENSION = 1600;
 const MAX_CONNECTIONS = 10000;
 const MAX_USERS_PER_ROOM = 500;
 const MAX_ROOM_CREATIONS = 20; 
-const MAX_ROOM_CREATIONS_PERIOD = 10 * 60 * 1000; // 10 min
-const MAX_FILE_UPLOADS = 5; // per socket
-const MAX_FILE_UPLOADS_PERIOD = 30 * 1000; // 30 secs
+const MAX_ROOM_CREATIONS_PERIOD = 10 * 60 * 1000;
+const MAX_FILE_UPLOADS = 5;
+const MAX_FILE_UPLOADS_PERIOD = 30 * 1000;
 
 const SERVER_HOST = process.env.HOST || "127.0.0.1";
 
@@ -129,9 +127,6 @@ const pendingUploads = Object.create(null);
 
 function sanitizeUploadName(fileName) {
   if (typeof fileName !== "string") return "file";
-  // Strip only control characters and path/quote characters so non-Latin
-  // names (e.g. Cyrillic) survive; everything else is safe for display and
-  // is HTML-escaped by the client and re-encoded for the download header.
   const normalized = path.basename(fileName).replace(/[\x00-\x1f\x7f\\/"]+/g, "_").trim();
   return normalized || "file";
 }
@@ -201,8 +196,6 @@ app.get('/uploads/:filename', (req, res) => {
 
     if (!meta?.inlinePreview) {
       const rawName = meta?.originalName || requestedFile;
-      // Non-ASCII characters (e.g. Cyrillic) aren't valid raw HTTP header
-      // bytes, so send an ASCII fallback plus an RFC 5987 encoded name.
       const asciiFallback = rawName.replace(/[^\x20-\x7E]/g, "_").replace(/"/g, "'") || "file";
       res.setHeader(
         "Content-Disposition",
@@ -216,8 +209,6 @@ app.get('/uploads/:filename', (req, res) => {
   }
 });
 
-// Serve static assets after the secured uploads route so generic files
-// keep Content-Disposition: attachment and correct MIME types.
 app.use(express.static("public"));
 
 function sanitizeString(str, maxLen) {
@@ -230,6 +221,34 @@ function sanitizeString(str, maxLen) {
 
 function hashPassword(password) {
   return crypto.createHash("sha256").update(password).digest("hex");
+}
+
+function generateMessageId() {
+  return crypto.randomBytes(9).toString("base64url");
+}
+
+const MESSAGE_CACHE_LIMIT = 200;
+
+function cacheMessageForReply(roomData, msgId, nickname, snippet, type) {
+  if (!roomData) return;
+  if (!roomData.messageCache) roomData.messageCache = new Map();
+  roomData.messageCache.set(msgId, { nickname, snippet, type });
+  if (roomData.messageCache.size > MESSAGE_CACHE_LIMIT) {
+    roomData.messageCache.delete(roomData.messageCache.keys().next().value);
+  }
+}
+
+function resolveReplyTo(roomData, replyTo) {
+  if (!roomData || !roomData.messageCache) return null;
+  if (!replyTo || typeof replyTo !== "object") return null;
+
+  const msgId = typeof replyTo.msgId === "string" ? replyTo.msgId.trim().slice(0, 32) : "";
+  if (!msgId) return null;
+
+  const entry = roomData.messageCache.get(msgId);
+  if (!entry) return null;
+
+  return { msgId, nickname: entry.nickname, snippet: entry.snippet, type: entry.type };
 }
 
 function deleteRoomFiles(roomName) {
@@ -293,8 +312,6 @@ async function optimizeUploadBuffer(buffer, fileType) {
 
   if (isImage && !isAnimatedGif) {
     try {
-      // Always re-encode non-GIF images to strip EXIF/metadata.
-      // Large images are also resized to keep payloads reasonable.
       let pipeline = sharp(finalBuffer).rotate();
       if (finalBuffer.length > MAX_IMAGE_BYTES) {
         pipeline = pipeline.resize({
@@ -327,9 +344,10 @@ async function optimizeUploadBuffer(buffer, fileType) {
 }
 
 async function saveUploadedMedia(socket, payload) {
-  const { fileName, fileType, thumbnail, buffer } = payload;
+  const { fileName, fileType, thumbnail, buffer, replyTo } = payload;
 
-  if (!socket.room || !rooms[socket.room]) {
+  const roomData = rooms[socket.room];
+  if (!socket.room || !roomData) {
     socket.emit("mediaError", "You are not in a room");
     return false;
   }
@@ -366,21 +384,31 @@ async function saveUploadedMedia(socket, payload) {
       inlinePreview
     };
 
+    const isImage = finalType.startsWith("image/");
+    const isVideo = finalType.startsWith("video/");
+    const displayName = sanitizedFileName.substring(0, 100);
+    const msgId = generateMessageId();
+
     const mediaMsg = {
       type: "media",
-      fileName: sanitizedFileName.substring(0, 100),
+      msgId,
+      fileName: displayName,
       fileUrl: `/uploads/${uniqueName}`,
       fileType: finalType,
       fileSize: finalBuffer.length,
-      thumbnail: inlinePreview && finalType.startsWith("image/") ? thumbnail || null : null,
-      isImage: finalType.startsWith("image/"),
-      isVideo: finalType.startsWith("video/"),
-      isGenericFile: !(finalType.startsWith("image/") || finalType.startsWith("video/")),
+      thumbnail: inlinePreview && isImage ? thumbnail || null : null,
+      isImage,
+      isVideo,
+      isGenericFile: !(isImage || isVideo),
       nickname: socket.nickname,
       time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       self: false,
-      metadataStripped: metadataStripped || inlinePreview
+      metadataStripped: metadataStripped || inlinePreview,
+      replyTo: resolveReplyTo(roomData, replyTo)
     };
+
+    const snippetEmoji = isImage ? "📸" : isVideo ? "🎥" : "📎";
+    cacheMessageForReply(roomData, msgId, socket.nickname, `${snippetEmoji} ${displayName}`, "media");
 
     socket.to(socket.room).emit("chatMessage", mediaMsg);
     socket.emit("chatMessage", { ...mediaMsg, self: true });
@@ -407,7 +435,7 @@ async function finalizeChunkedUpload(socket, storeKey) {
     }
 
     const buffer = Buffer.concat(uploadStore.chunks, uploadStore.receivedBytes);
-    const { fileName, fileType, fileSize, thumbnail } = uploadStore;
+    const { fileName, fileType, fileSize, thumbnail, replyTo } = uploadStore;
     cleanupPendingUpload(storeKey);
 
     if (typeof fileSize === "number" && fileSize > 0 && buffer.length !== fileSize) {
@@ -421,7 +449,8 @@ async function finalizeChunkedUpload(socket, storeKey) {
       fileType,
       fileSize: buffer.length,
       thumbnail,
-      buffer
+      buffer,
+      replyTo
     });
   } catch (error) {
     cleanupPendingUpload(storeKey);
@@ -623,7 +652,6 @@ io.on("connection", (socket) => {
 
       if (!roomData.voiceUsers) roomData.voiceUsers = Object.create(null);
 
-      // Peers already in voice: the joiner will initiate a WebRTC offer to each.
       const existingPeers = Object.keys(roomData.voiceUsers);
 
       roomData.voiceUsers[socket.id] = {
@@ -641,8 +669,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Relays WebRTC offer/answer/ICE-candidate signaling between two peers already
-  // in the same room's voice roster; the server never touches the media itself.
   socket.on("voiceSignal", ({ to, data } = {}) => {
     if (!socket.room || !rooms[socket.room]) return;
     if (typeof to !== "string" || !to || !data || typeof data !== "object") return;
@@ -676,25 +702,31 @@ io.on("connection", (socket) => {
   });
 
 
-  socket.on("chatMessage", (msg) => {
+  socket.on("chatMessage", (payload) => {
     const now = Date.now();
     if (now - socket.lastMsg < 500) return;
     socket.lastMsg = now;
 
-    if (!socket.room || !rooms[socket.room]) return;
-    if (typeof msg !== "string") return;
-    
-    msg = msg.trim();
+    const roomData = rooms[socket.room];
+    if (!roomData) return;
+    if (!payload || typeof payload !== "object" || typeof payload.msg !== "string") return;
+
+    const msg = payload.msg.trim();
     if (!msg || msg.length > MAX_MSG_LEN) return;
 
-    // We allow any printable characters in chat messages. XSS protection happens
-    // when the message is rendered on the client by escaping HTML and sanitizing URLs.
+    const replyTo = resolveReplyTo(roomData, payload.replyTo);
+    const msgId = generateMessageId();
+
     const messageData = {
+      msgId,
       msg: msg,
       nickname: socket.nickname,
       time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-      self: false
+      self: false,
+      replyTo
     };
+
+    cacheMessageForReply(roomData, msgId, socket.nickname, msg.slice(0, 120), "text");
 
     socket.to(socket.room).emit("chatMessage", messageData);
     socket.emit("chatMessage", { ...messageData, self: true });
@@ -793,7 +825,8 @@ io.on("connection", (socket) => {
       thumbnail,
       chunkIndex,
       totalChunks,
-      chunkData
+      chunkData,
+      replyTo
     } = data;
 
     if (
@@ -849,7 +882,6 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // Limit concurrent unfinished uploads per socket
       const activeForSocket = Object.keys(pendingUploads).filter((key) => key.startsWith(`${socket.id}:`)).length;
       if (activeForSocket >= 3) {
         const result = { ok: false, error: "Too many uploads in progress" };
@@ -863,6 +895,7 @@ io.on("connection", (socket) => {
         fileType: fileType || "application/octet-stream",
         fileSize: typeof fileSize === "number" ? fileSize : null,
         thumbnail: thumbnail || null,
+        replyTo: replyTo || null,
         totalChunks,
         chunks: new Array(totalChunks),
         receivedCount: 0,
@@ -905,8 +938,6 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Chunk size must match the sender's negotiated upload size and allow larger
-    // images/files to be split into multiple safe chunks.
     if (buffer.length > MAX_CHUNK_BYTES) {
       cleanupPendingUpload(storeKey);
       const result = { ok: false, error: "Chunk too large" };

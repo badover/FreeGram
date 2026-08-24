@@ -26,12 +26,19 @@ const voiceMuteBtn = document.getElementById("voiceMuteBtn");
 const voiceDeafenBtn = document.getElementById("voiceDeafenBtn");
 const voiceStatusLabel = document.getElementById("voiceStatusLabel");
 const voiceUsersList = document.getElementById("voiceUsersList");
+const replyPreviewBar = document.getElementById("replyPreviewBar");
+const replyPreviewNickname = document.getElementById("replyPreviewNickname");
+const replyPreviewSnippet = document.getElementById("replyPreviewSnippet");
+const replyPreviewCancel = document.getElementById("replyPreviewCancel");
 
 let currentRoom = "";
 let currentNickname = "";
-let typingUsers = new Map(); 
+let typingUsers = new Map();
 let typingTimeout = null;
 let isTyping = false;
+let replyingTo = null;
+const messageRegistry = new Map();
+const MESSAGE_REGISTRY_LIMIT = 300;
 let voiceJoined = false;
 let voiceMuted = false;
 let voiceDeafened = false;
@@ -53,8 +60,6 @@ let voiceContextMenu = null;
 
 const GENERIC_ERROR_MESSAGE = "Something went wrong. Please try again.";
 const MAX_UPLOAD_SIZE = 50 * 1024 * 1024;
-// Keep the raw chunk far below the server limit so base64 transport never trips
-// the server with larger images or videos.
 const CHUNK_SIZE = 512 * 1024;
 const THUMBNAIL_SIZE_LIMIT = 8 * 1024 * 1024;
 const MAX_CHAT_LENGTH = 4000;
@@ -94,26 +99,34 @@ function getFileEmoji(fileType = "", fileName = "") {
   return "📎";
 }
 
-function buildThumbnailAndSend(file, fileData) {
+function buildThumbnailAndSend(file, fileData, replyTo) {
   if (!isPreviewableImage(file.type) || file.size > THUMBNAIL_SIZE_LIMIT) {
-    sendMediaToServer(file, fileData, null);
+    sendMediaToServer(file, fileData, null, replyTo);
     return;
   }
 
   const objectUrl = URL.createObjectURL(file);
   const img = new Image();
   img.onload = function() {
+    const displaySize = 150;
+    const renderSize = Math.round(displaySize * Math.min(window.devicePixelRatio || 1, 2));
+
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
-    canvas.width = 150;
-    canvas.height = 150;
-    ctx.drawImage(img, 0, 0, 150, 150);
-    const thumbnail = canvas.toDataURL('image/jpeg', 0.7);
-    sendMediaToServer(file, fileData, thumbnail);
+    canvas.width = renderSize;
+    canvas.height = renderSize;
+
+    const sourceSize = Math.min(img.naturalWidth, img.naturalHeight);
+    const sourceX = (img.naturalWidth - sourceSize) / 2;
+    const sourceY = (img.naturalHeight - sourceSize) / 2;
+    ctx.drawImage(img, sourceX, sourceY, sourceSize, sourceSize, 0, 0, renderSize, renderSize);
+
+    const thumbnail = canvas.toDataURL('image/jpeg', 0.82);
+    sendMediaToServer(file, fileData, thumbnail, replyTo);
     URL.revokeObjectURL(objectUrl);
   };
   img.onerror = function() {
-    sendMediaToServer(file, fileData, null);
+    sendMediaToServer(file, fileData, null, replyTo);
     URL.revokeObjectURL(objectUrl);
   };
   img.src = objectUrl;
@@ -498,7 +511,6 @@ socket.on("roomJoined", (data) => {
   resetVoiceStateUI();
   
   addSystemMessage(`>>> ROOM: ${currentRoom}`);
-  // addSystemMessage(">>> ALL FILES ARE STRIPPED OF METADATA");
   
   createMediaUploadButton();
   
@@ -541,6 +553,67 @@ chatInput.addEventListener("keydown", (e) => {
   }
 });
 
+function truncateSnippet(text, maxLen = 80) {
+  const trimmed = String(text || "").trim();
+  if (trimmed.length <= maxLen) return trimmed;
+  return `${trimmed.slice(0, maxLen - 1).trimEnd()}…`;
+}
+
+function registerMessage(msgId, nickname, snippet, type, el) {
+  if (!msgId) return;
+  messageRegistry.set(msgId, { nickname: String(nickname || ""), snippet, type, el });
+  if (messageRegistry.size > MESSAGE_REGISTRY_LIMIT) {
+    messageRegistry.delete(messageRegistry.keys().next().value);
+  }
+}
+
+function startReply(msgId) {
+  const entry = messageRegistry.get(msgId);
+  if (!entry) return;
+
+  replyingTo = { msgId, nickname: entry.nickname, snippet: entry.snippet, type: entry.type };
+  if (replyPreviewNickname) replyPreviewNickname.textContent = entry.nickname;
+  if (replyPreviewSnippet) replyPreviewSnippet.textContent = entry.snippet;
+  if (replyPreviewBar) replyPreviewBar.style.display = "flex";
+  chatInput.focus();
+}
+
+function cancelReply() {
+  replyingTo = null;
+  if (replyPreviewBar) replyPreviewBar.style.display = "none";
+}
+
+function scrollToMessage(msgId) {
+  const entry = messageRegistry.get(msgId);
+  if (!entry || !entry.el || !entry.el.isConnected) return;
+  entry.el.scrollIntoView({ behavior: "smooth", block: "center" });
+  entry.el.classList.add("message-highlight");
+  setTimeout(() => entry.el.classList.remove("message-highlight"), 1200);
+}
+
+function buildReplyQuoteHtml(replyTo) {
+  if (!replyTo || !replyTo.msgId) return "";
+  const nickname = escapeHtml(String(replyTo.nickname || ""));
+  const snippet = escapeHtml(String(replyTo.snippet || ""));
+  const targetId = escapeHtml(String(replyTo.msgId));
+  return `
+    <div class="message-reply-quote" data-reply-target="${targetId}">
+      <span class="message-reply-quote-nickname">${nickname}</span>
+      <span class="message-reply-quote-snippet">${snippet}</span>
+    </div>
+  `;
+}
+
+function buildReplyButtonHtml(msgId) {
+  if (!msgId) return "";
+  const id = escapeHtml(String(msgId));
+  return `<button type="button" class="message-reply-btn" data-reply-to="${id}" aria-label="Reply" title="Reply"><i class="fas fa-reply"></i></button>`;
+}
+
+if (replyPreviewCancel) {
+  replyPreviewCancel.addEventListener("click", cancelReply);
+}
+
 function sendMessage() {
   const msg = normalizeOutgoingMessage(chatInput.value);
   if (!msg) return;
@@ -549,9 +622,10 @@ function sendMessage() {
     return;
   }
 
-  socket.emit("chatMessage", msg);
+  socket.emit("chatMessage", { msg, replyTo: replyingTo ? { msgId: replyingTo.msgId } : null });
   chatInput.value = "";
   resizeChatInput();
+  cancelReply();
 }
 
 function createMediaUploadButton() {
@@ -629,7 +703,7 @@ function emitUploadChunk(payload) {
   });
 }
 
-async function sendMediaToServer(file, fileData, thumbnail) {
+async function sendMediaToServer(file, fileData, thumbnail, replyTo) {
   const bytes = fileData instanceof ArrayBuffer
     ? new Uint8Array(fileData)
     : new Uint8Array(fileData);
@@ -650,13 +724,13 @@ async function sendMediaToServer(file, fileData, thumbnail) {
       const end = Math.min(start + CHUNK_SIZE, bytes.byteLength);
       const chunk = bytes.subarray(start, end);
 
-      // Base64 keeps chunk payloads reliable across Socket.IO transports.
       const response = await emitUploadChunk({
         uploadId,
         fileName: file.name || "file",
         fileType,
         fileSize: file.size || bytes.byteLength,
         thumbnail: index === 0 ? thumbnail : null,
+        replyTo: index === 0 && replyTo ? { msgId: replyTo.msgId } : null,
         chunkIndex: index,
         totalChunks,
         chunkData: uint8ToBase64(chunk)
@@ -669,7 +743,6 @@ async function sendMediaToServer(file, fileData, thumbnail) {
   } catch (error) {
     console.error("Upload failed:", file.name, error);
     const message = error && error.message ? String(error.message) : "unknown error";
-    // Server-side failures already arrive via the mediaError event.
     if (/timed out|network|disconnected|Upload failed$/i.test(message)) {
       addSystemMessage(`>>> ${GENERIC_ERROR_MESSAGE}`);
     }
@@ -694,35 +767,29 @@ function addTextMessage(data) {
   const messageHtml = linkifyMessageText(data.msg);
   const nickname = escapeHtml(String(data.nickname || ""));
   const time = escapeHtml(String(data.time || ""));
-  
-  if (data.self) {
-    messageDiv.className = "message-self";
-    messageDiv.innerHTML = `
-      <div class="message-header">
-        <span class="message-nickname">${nickname}</span>
-        <span class="message-time">${time}</span>
-      </div>
-      <div class="message-content">${messageHtml}</div>
-    `;
-  } else {
-    messageDiv.className = "message-other";
-    messageDiv.innerHTML = `
-      <div class="message-header">
-        <span class="message-nickname">${nickname}</span>
-        <span class="message-time">${time}</span>
-      </div>
-      <div class="message-content">${messageHtml}</div>
-    `;
-  }
-  
+
+  messageDiv.className = data.self ? "message-self" : "message-other";
+  if (data.msgId) messageDiv.dataset.msgId = data.msgId;
+  messageDiv.innerHTML = `
+    <div class="message-header">
+      <span class="message-nickname">${nickname}</span>
+      <span class="message-time">${time}</span>
+      ${buildReplyButtonHtml(data.msgId)}
+    </div>
+    ${buildReplyQuoteHtml(data.replyTo)}
+    <div class="message-content">${messageHtml}</div>
+  `;
+
   messagesList.appendChild(messageDiv);
+  registerMessage(data.msgId, data.nickname, truncateSnippet(data.msg), "text", messageDiv);
   scrollToBottom();
 }
 
 function addMediaMessage(data) {
   const messageDiv = document.createElement("div");
   messageDiv.className = data.self ? "message-self media-message" : "message-other media-message";
-  
+  if (data.msgId) messageDiv.dataset.msgId = data.msgId;
+
   const fileSize = formatFileSize(data.fileSize);
   
   let mediaContent = '';
@@ -775,10 +842,12 @@ function addMediaMessage(data) {
     <div class="message-header">
       <span class="message-nickname">${escapeHtml(data.nickname)}</span>
       <span class="message-time">${escapeHtml(data.time)}</span>
+      ${buildReplyButtonHtml(data.msgId)}
     </div>
+    ${buildReplyQuoteHtml(data.replyTo)}
     ${mediaContent}
   `;
-  
+
   messagesList.appendChild(messageDiv);
   const zoomableMedia = messageDiv.querySelector(".media-thumbnail");
   if (zoomableMedia) {
@@ -788,6 +857,9 @@ function addMediaMessage(data) {
       openFullImage(zoomableMedia.dataset.fullUrl);
     });
   }
+
+  const mediaSnippetPrefix = data.isImage ? "📸" : data.isVideo ? "🎥" : getFileEmoji(data.fileType, data.fileName);
+  registerMessage(data.msgId, data.nickname, `${mediaSnippetPrefix} ${truncateSnippet(data.fileName, 60)}`, "media", messageDiv);
   scrollToBottom();
 }
 
@@ -956,7 +1028,6 @@ function handleGlobalPaste(e) {
             const file = item.getAsFile();
             if (file) {
                 if (chatScreen.style.display === 'block') {
-                    // addSystemMessage(`>>> Pasting ${file.type.startsWith('image/') ? 'image' : 'video'}...`);
                     uploadMedia(file);
                     e.preventDefault();
                     return;
@@ -1006,7 +1077,6 @@ function processDroppedFiles(files) {
     }
     
     if (validFiles.length > 5) {
-        // addSystemMessage(`>>> Uploading ${validFiles.length} files...`);
     }
     
     validFiles.forEach((file, index) => {
@@ -1033,10 +1103,13 @@ function uploadMedia(file) {
 
     addUploadNotification(file);
 
+    const replyTo = replyingTo;
+    cancelReply();
+
     const reader = new FileReader();
 
     reader.onload = function(e) {
-        buildThumbnailAndSend(file, e.target.result);
+        buildThumbnailAndSend(file, e.target.result, replyTo);
     };
 
     reader.onerror = (error) => {
@@ -1297,8 +1370,6 @@ function startVoiceVad(stream) {
     }
 
     const level = total / data.length;
-    // Threshold rides just above the ambient noise floor instead of a fixed
-    // value, so it self-calibrates to each mic's gain/background noise.
     const threshold = voiceVadNoiseFloor + VOICE_VAD_MARGIN;
     const isAboveThreshold = level > threshold;
     const now = Date.now();
@@ -1308,15 +1379,11 @@ function startVoiceVad(stream) {
       voiceVadLastAboveTime = now;
     } else {
       voiceVadAboveCount = 0;
-      // Only drift the noise floor toward quiet samples, never while speaking,
-      // so a long sentence can't slowly raise the threshold out from under it.
       voiceVadNoiseFloor = Math.min(20, Math.max(0.3,
         voiceVadNoiseFloor + (level - voiceVadNoiseFloor) * VOICE_VAD_NOISE_SMOOTHING
       ));
     }
 
-    // Require a couple of consecutive loud frames to start (ignores clicks/pops),
-    // then hold "speaking" through brief pauses between words for a flicker-free indicator.
     const withinHangover = voiceSpeaking && (now - voiceVadLastAboveTime) < VOICE_VAD_HANGOVER_MS;
     const nowSpeaking = voiceVadAboveCount >= VOICE_VAD_ONSET_FRAMES || withinHangover;
 
@@ -1797,6 +1864,18 @@ function hasActiveTextSelection() {
 }
 
 messagesList.addEventListener("click", (e) => {
+  const replyBtn = e.target.closest(".message-reply-btn");
+  if (replyBtn) {
+    startReply(replyBtn.dataset.replyTo);
+    return;
+  }
+
+  const replyQuote = e.target.closest(".message-reply-quote");
+  if (replyQuote) {
+    scrollToMessage(replyQuote.dataset.replyTarget);
+    return;
+  }
+
   if (!chatInput) return;
   if (hasActiveTextSelection()) return;
 

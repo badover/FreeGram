@@ -125,6 +125,13 @@
       
       
       <div class="input-panel">
+        <div id="replyPreviewBar" class="reply-preview-bar" style="display:none;">
+          <div class="reply-preview-content">
+            <span class="reply-preview-label">Replying to <span id="replyPreviewNickname"></span></span>
+            <span id="replyPreviewSnippet" class="reply-preview-snippet"></span>
+          </div>
+          <button id="replyPreviewCancel" type="button" class="reply-preview-cancel" aria-label="Cancel reply">&times;</button>
+        </div>
         <div class="input-wrapper">
           <span class="input-prompt">></span>
           <textarea id="chatInput" placeholder="TYPE MESSAGE..." class="message-input" rows="1"></textarea>
