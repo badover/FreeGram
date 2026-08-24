@@ -1,12 +1,11 @@
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
-const mediasoup = require("mediasoup");
-const os = require("os");
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const rateLimit = require('express-rate-limit');
+const sharp = require('sharp');
 
 const app = express();
 const server = http.createServer(app);
@@ -16,11 +15,37 @@ const io = new Server(server, {
   maxHttpBufferSize: 100e6
 });
 
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
+
+app.use((req, res, next) => {
+    res.setHeader("Content-Security-Policy",
+        "default-src 'self'; " +
+        "img-src 'self' data: blob:; " +
+        "media-src 'self' blob:; " +
+        "script-src 'self'; " +
+        "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com; " +
+        "font-src 'self' data: https://cdnjs.cloudflare.com https://fonts.gstatic.com; " +
+        "connect-src 'self' ws: wss:;"
+    );
+
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("X-XSS-Protection", "1; mode=block");
+
+    next();
+});
+
 const MAX_MSG_LEN = 4000;
 const MAX_NICK_LEN = 20;
 const MAX_ROOM_LEN = 30;
 const MAX_PASSWORD_LEN = 64;
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+// Server-side limit must stay above the largest decoded chunk that the client can
+// legitimately send through Socket.IO base64 transport.
+const MAX_CHUNK_BYTES = 2 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_IMAGE_DIMENSION = 1600;
 
 const MAX_CONNECTIONS = 10000;
 const MAX_USERS_PER_ROOM = 500;
@@ -30,18 +55,6 @@ const MAX_FILE_UPLOADS = 5; // per socket
 const MAX_FILE_UPLOADS_PERIOD = 30 * 1000; // 30 secs
 
 const SERVER_HOST = process.env.HOST || "127.0.0.1";
-const WEBRTC_LISTEN_IP = process.env.WEBRTC_LISTEN_IP || "0.0.0.0";
-const WEBRTC_MIN_PORT = Number(process.env.WEBRTC_MIN_PORT || 40000);
-const WEBRTC_MAX_PORT = Number(process.env.WEBRTC_MAX_PORT || 49999);
-
-const MEDIA_CODECS = [
-  {
-    kind: "audio",
-    mimeType: "audio/opus",
-    clockRate: 48000,
-    channels: 2
-  }
-];
 
 const UPLOADS_DIR = path.join(__dirname, 'public', 'uploads');
 if (!fs.existsSync(UPLOADS_DIR)) {
@@ -112,12 +125,14 @@ let activeConnections = 0;
 const rooms = {};
 const roomFiles = {}; 
 const uploadedFiles = Object.create(null);
-let mediasoupWorker = null;
-let effectiveAnnouncedIp = process.env.WEBRTC_ANNOUNCED_IP || undefined;
+const pendingUploads = Object.create(null);
 
 function sanitizeUploadName(fileName) {
   if (typeof fileName !== "string") return "file";
-  const normalized = path.basename(fileName).replace(/[^\w.\-() ]+/g, "_").trim();
+  // Strip only control characters and path/quote characters so non-Latin
+  // names (e.g. Cyrillic) survive; everything else is safe for display and
+  // is HTML-escaped by the client and re-encoded for the download header.
+  const normalized = path.basename(fileName).replace(/[\x00-\x1f\x7f\\/"]+/g, "_").trim();
   return normalized || "file";
 }
 
@@ -136,97 +151,6 @@ function isInlineUpload(fileType) {
     fileType.startsWith("image/") ||
     fileType.startsWith("video/")
   );
-}
-
-function detectLocalIPv4() {
-  const interfaces = os.networkInterfaces();
-  for (const values of Object.values(interfaces)) {
-    if (!Array.isArray(values)) continue;
-    for (const item of values) {
-      if (!item || item.family !== "IPv4" || item.internal) continue;
-      return item.address;
-    }
-  }
-  return null;
-}
-
-async function initMediasoupWorker() {
-  mediasoupWorker = await mediasoup.createWorker({
-    rtcMinPort: WEBRTC_MIN_PORT,
-    rtcMaxPort: WEBRTC_MAX_PORT
-  });
-
-  mediasoupWorker.on("died", () => {
-    console.error("Mediasoup worker died, exiting in 2 seconds");
-    setTimeout(() => process.exit(1), 2000);
-  });
-}
-
-async function getOrCreateVoiceRouter(roomName) {
-  const roomData = rooms[roomName];
-  if (!roomData) return null;
-  if (!mediasoupWorker) return null;
-
-  if (!roomData.voiceRouter) {
-    roomData.voiceRouter = await mediasoupWorker.createRouter({ mediaCodecs: MEDIA_CODECS });
-    roomData.voicePeers = Object.create(null);
-  }
-
-  return roomData.voiceRouter;
-}
-
-function ensureVoicePeer(roomName, socketId) {
-  const roomData = rooms[roomName];
-  if (!roomData) return null;
-
-  if (!roomData.voicePeers) roomData.voicePeers = Object.create(null);
-  if (!roomData.voicePeers[socketId]) {
-    roomData.voicePeers[socketId] = {
-      transports: new Map(),
-      producers: new Map(),
-      consumers: new Map()
-    };
-  }
-
-  return roomData.voicePeers[socketId];
-}
-
-function closePeerMedia(peer) {
-  if (!peer) return;
-
-  for (const consumer of peer.consumers.values()) {
-    try { consumer.close(); } catch (_) {}
-  }
-  for (const producer of peer.producers.values()) {
-    try { producer.close(); } catch (_) {}
-  }
-  for (const transport of peer.transports.values()) {
-    try { transport.close(); } catch (_) {}
-  }
-
-  peer.consumers.clear();
-  peer.producers.clear();
-  peer.transports.clear();
-}
-
-function listVoiceProducerInfos(roomName, excludeSocketId = null) {
-  const roomData = rooms[roomName];
-  if (!roomData || !roomData.voicePeers) return [];
-
-  const producers = [];
-
-  for (const [socketId, peer] of Object.entries(roomData.voicePeers)) {
-    if (excludeSocketId && socketId === excludeSocketId) continue;
-    for (const producer of peer.producers.values()) {
-      producers.push({
-        producerId: producer.id,
-        socketId,
-        nickname: (roomData.voiceUsers && roomData.voiceUsers[socketId]?.nickname) || "Anonymous"
-      });
-    }
-  }
-
-  return producers;
 }
 
 function emitVoiceParticipants(roomName) {
@@ -251,11 +175,6 @@ function leaveVoice(socket) {
   const roomData = rooms[roomName];
   if (!roomData.voiceUsers || !roomData.voiceUsers[socket.id]) return;
 
-  if (roomData.voicePeers && roomData.voicePeers[socket.id]) {
-    closePeerMedia(roomData.voicePeers[socket.id]);
-    delete roomData.voicePeers[socket.id];
-  }
-
   delete roomData.voiceUsers[socket.id];
 
   io.to(roomName).emit("voiceUserLeft", { socketId: socket.id, nickname: socket.nickname });
@@ -263,14 +182,49 @@ function leaveVoice(socket) {
   emitVoiceParticipants(roomName);
 }
 
-app.use(express.static("public"));
 app.use('/uploads/', apiLimiter);
+
+app.get('/uploads/:filename', (req, res) => {
+  const requestedFile = path.basename(req.params.filename || "");
+  if (!requestedFile || requestedFile !== req.params.filename) {
+    res.status(400).send('Invalid file name');
+    return;
+  }
+
+  const filePath = path.join(UPLOADS_DIR, requestedFile);
+  const meta = uploadedFiles[requestedFile];
+
+  if (fs.existsSync(filePath)) {
+    if (meta?.mimeType) {
+      res.type(meta.mimeType);
+    }
+
+    if (!meta?.inlinePreview) {
+      const rawName = meta?.originalName || requestedFile;
+      // Non-ASCII characters (e.g. Cyrillic) aren't valid raw HTTP header
+      // bytes, so send an ASCII fallback plus an RFC 5987 encoded name.
+      const asciiFallback = rawName.replace(/[^\x20-\x7E]/g, "_").replace(/"/g, "'") || "file";
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(rawName)}`
+      );
+    }
+    res.sendFile(filePath);
+  } else {
+    console.error(`File not found: ${req.params.filename}`);
+    res.status(404).send('File not found');
+  }
+});
+
+// Serve static assets after the secured uploads route so generic files
+// keep Content-Disposition: attachment and correct MIME types.
+app.use(express.static("public"));
 
 function sanitizeString(str, maxLen) {
   if (typeof str !== "string") return null;
   str = str.trim();
   if (!str || str.length > maxLen) return null;
-  return str.replace(/[<>]/g, "");
+  return str;
 }
 
 
@@ -295,18 +249,185 @@ function deleteRoomFiles(roomName) {
   }
 }
 
-function closeRoomVoice(roomName) {
-  const roomData = rooms[roomName];
-  if (!roomData) return;
+function cleanupPendingUpload(storeKey) {
+  const store = pendingUploads[storeKey];
+  if (!store) return;
+  if (store.tempFilePath && fs.existsSync(store.tempFilePath)) {
+    try {
+      fs.unlinkSync(store.tempFilePath);
+    } catch (err) {
+      console.error("Failed to remove temp upload:", err.message);
+    }
+  }
+  delete pendingUploads[storeKey];
+}
 
-  if (roomData.voicePeers) {
-    Object.values(roomData.voicePeers).forEach(closePeerMedia);
-    roomData.voicePeers = Object.create(null);
+function decodeChunkData(chunkData) {
+  if (Buffer.isBuffer(chunkData)) {
+    return chunkData;
+  }
+  if (chunkData instanceof ArrayBuffer) {
+    return Buffer.from(chunkData);
+  }
+  if (ArrayBuffer.isView(chunkData)) {
+    return Buffer.from(chunkData.buffer, chunkData.byteOffset, chunkData.byteLength);
+  }
+  if (typeof chunkData === "string") {
+    return Buffer.from(chunkData, "base64");
+  }
+  if (chunkData && typeof chunkData === "object" && chunkData.type === "Buffer" && Array.isArray(chunkData.data)) {
+    return Buffer.from(chunkData.data);
+  }
+  throw new Error("Unsupported chunk data format");
+}
+
+async function optimizeUploadBuffer(buffer, fileType) {
+  let finalBuffer = buffer;
+  let finalType = typeof fileType === "string" && fileType.trim()
+    ? fileType.trim()
+    : "application/octet-stream";
+  let metadataStripped = false;
+
+  const isImage = finalType.startsWith("image/");
+  const isAnimatedGif = finalType === "image/gif";
+
+  if (isImage && !isAnimatedGif) {
+    try {
+      // Always re-encode non-GIF images to strip EXIF/metadata.
+      // Large images are also resized to keep payloads reasonable.
+      let pipeline = sharp(finalBuffer).rotate();
+      if (finalBuffer.length > MAX_IMAGE_BYTES) {
+        pipeline = pipeline.resize({
+          width: MAX_IMAGE_DIMENSION,
+          height: MAX_IMAGE_DIMENSION,
+          fit: "inside",
+          withoutEnlargement: true
+        });
+      }
+
+      if (finalType === "image/png") {
+        finalBuffer = await pipeline.png({ compressionLevel: 8 }).toBuffer();
+        finalType = "image/png";
+      } else if (finalType === "image/webp") {
+        finalBuffer = await pipeline.webp({ quality: 80 }).toBuffer();
+        finalType = "image/webp";
+      } else {
+        finalBuffer = await pipeline.jpeg({ quality: 78, progressive: true }).toBuffer();
+        finalType = "image/jpeg";
+      }
+      metadataStripped = true;
+    } catch (optimizeError) {
+      console.error("Image optimize failed, keeping original:", optimizeError.message);
+    }
+  } else if (isInlineUpload(finalType)) {
+    metadataStripped = true;
   }
 
-  if (roomData.voiceRouter) {
-    try { roomData.voiceRouter.close(); } catch (_) {}
-    roomData.voiceRouter = null;
+  return { finalBuffer, finalType, metadataStripped };
+}
+
+async function saveUploadedMedia(socket, payload) {
+  const { fileName, fileType, thumbnail, buffer } = payload;
+
+  if (!socket.room || !rooms[socket.room]) {
+    socket.emit("mediaError", "You are not in a room");
+    return false;
+  }
+
+  if (!fileName || !buffer || !Buffer.isBuffer(buffer) || buffer.length === 0) {
+    console.error("Invalid upload payload");
+    socket.emit("mediaError", "Invalid file payload");
+    return false;
+  }
+
+  if (buffer.length > MAX_FILE_SIZE) {
+    socket.emit("mediaError", "File is too large (max 50MB)");
+    return false;
+  }
+
+  try {
+    const sanitizedFileName = sanitizeUploadName(fileName);
+    const { finalBuffer, finalType, metadataStripped } = await optimizeUploadBuffer(buffer, fileType);
+    const fileExt = getStoredFileExtension(sanitizedFileName, finalType);
+    const uniqueName = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}.${fileExt}`;
+    const filePath = path.join(UPLOADS_DIR, uniqueName);
+
+    fs.writeFileSync(filePath, finalBuffer);
+
+    if (!roomFiles[socket.room]) {
+      roomFiles[socket.room] = [];
+    }
+    roomFiles[socket.room].push(uniqueName);
+
+    const inlinePreview = isInlineUpload(finalType);
+    uploadedFiles[uniqueName] = {
+      originalName: sanitizedFileName.substring(0, 100),
+      mimeType: finalType,
+      inlinePreview
+    };
+
+    const mediaMsg = {
+      type: "media",
+      fileName: sanitizedFileName.substring(0, 100),
+      fileUrl: `/uploads/${uniqueName}`,
+      fileType: finalType,
+      fileSize: finalBuffer.length,
+      thumbnail: inlinePreview && finalType.startsWith("image/") ? thumbnail || null : null,
+      isImage: finalType.startsWith("image/"),
+      isVideo: finalType.startsWith("video/"),
+      isGenericFile: !(finalType.startsWith("image/") || finalType.startsWith("video/")),
+      nickname: socket.nickname,
+      time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      self: false,
+      metadataStripped: metadataStripped || inlinePreview
+    };
+
+    socket.to(socket.room).emit("chatMessage", mediaMsg);
+    socket.emit("chatMessage", { ...mediaMsg, self: true });
+    return true;
+  } catch (error) {
+    console.error("Upload save error:", error);
+    socket.emit("mediaError", "Failed to process uploaded file");
+    return false;
+  }
+}
+
+async function finalizeChunkedUpload(socket, storeKey) {
+  const uploadStore = pendingUploads[storeKey];
+  if (!uploadStore || uploadStore.finalizing) return false;
+  uploadStore.finalizing = true;
+
+  try {
+    for (let i = 0; i < uploadStore.totalChunks; i += 1) {
+      if (!Buffer.isBuffer(uploadStore.chunks[i])) {
+        cleanupPendingUpload(storeKey);
+        socket.emit("mediaError", "Upload incomplete");
+        return false;
+      }
+    }
+
+    const buffer = Buffer.concat(uploadStore.chunks, uploadStore.receivedBytes);
+    const { fileName, fileType, fileSize, thumbnail } = uploadStore;
+    cleanupPendingUpload(storeKey);
+
+    if (typeof fileSize === "number" && fileSize > 0 && buffer.length !== fileSize) {
+      console.error(`Upload size mismatch: expected ${fileSize}, got ${buffer.length}`);
+      socket.emit("mediaError", "File data incomplete");
+      return false;
+    }
+
+    return await saveUploadedMedia(socket, {
+      fileName,
+      fileType,
+      fileSize: buffer.length,
+      thumbnail,
+      buffer
+    });
+  } catch (error) {
+    cleanupPendingUpload(storeKey);
+    console.error("Chunk finalize error:", error);
+    socket.emit("mediaError", "Failed to process uploaded file");
+    return false;
   }
 }
 
@@ -347,8 +468,6 @@ io.on("connection", (socket) => {
       password: hashPassword(password),
       users: Object.create(null),
       voiceUsers: Object.create(null),
-      voicePeers: Object.create(null),
-      voiceRouter: null,
       createdAt: Date.now(),
       creator: socket.id
     };
@@ -452,7 +571,6 @@ io.on("connection", (socket) => {
           setTimeout(() => {
             if (rooms[roomToDelete] && Object.keys(rooms[roomToDelete].users).length === 0) {
               deleteRoomFiles(roomToDelete);
-              closeRoomVoice(roomToDelete);
               delete rooms[roomToDelete];
               console.log(`Room ${roomToDelete} deleted`);
             }
@@ -485,21 +603,15 @@ io.on("connection", (socket) => {
 
     io.to(room).emit("voiceRoomClosed");
 
-    closeRoomVoice(room);
-    
     deleteRoomFiles(room);
     delete rooms[room];
     io.in(room).socketsLeave(room);
   });
 
-  socket.on("voiceJoin", async (_, callback) => {
+  socket.on("voiceJoin", (_, callback) => {
     try {
       if (!socket.room || !rooms[socket.room]) {
         callback && callback({ ok: false, error: "Room not found" });
-        return;
-      }
-      if (!mediasoupWorker) {
-        callback && callback({ ok: false, error: "Voice service unavailable" });
         return;
       }
 
@@ -509,13 +621,11 @@ io.on("connection", (socket) => {
         return;
       }
 
-      const router = await getOrCreateVoiceRouter(socket.room);
-      if (!router) {
-        callback && callback({ ok: false, error: "Failed to init voice router" });
-        return;
-      }
+      if (!roomData.voiceUsers) roomData.voiceUsers = Object.create(null);
 
-      ensureVoicePeer(socket.room, socket.id);
+      // Peers already in voice: the joiner will initiate a WebRTC offer to each.
+      const existingPeers = Object.keys(roomData.voiceUsers);
+
       roomData.voiceUsers[socket.id] = {
         nickname: socket.nickname || "Anonymous",
         muted: false,
@@ -524,208 +634,27 @@ io.on("connection", (socket) => {
       };
 
       emitVoiceParticipants(socket.room);
-      callback && callback({
-        ok: true,
-        routerRtpCapabilities: router.rtpCapabilities,
-        existingProducers: listVoiceProducerInfos(socket.room, socket.id)
-      });
+      callback && callback({ ok: true, peers: existingPeers });
     } catch (error) {
       console.error("voiceJoin error:", error);
       callback && callback({ ok: false, error: "voiceJoin failed" });
     }
   });
 
-  socket.on("voiceCreateTransport", async ({ direction } = {}, callback) => {
-    try {
-      if (!socket.room || !rooms[socket.room]) {
-        callback && callback({ ok: false, error: "Room not found" });
-        return;
-      }
-      const roomData = rooms[socket.room];
-      if (!roomData.voiceUsers[socket.id]) {
-        callback && callback({ ok: false, error: "Join voice first" });
-        return;
-      }
+  // Relays WebRTC offer/answer/ICE-candidate signaling between two peers already
+  // in the same room's voice roster; the server never touches the media itself.
+  socket.on("voiceSignal", ({ to, data } = {}) => {
+    if (!socket.room || !rooms[socket.room]) return;
+    if (typeof to !== "string" || !to || !data || typeof data !== "object") return;
 
-      const router = await getOrCreateVoiceRouter(socket.room);
-      const peer = ensureVoicePeer(socket.room, socket.id);
+    const roomData = rooms[socket.room];
+    if (!roomData.voiceUsers || !roomData.voiceUsers[to] || !roomData.voiceUsers[socket.id]) return;
 
-      const listenIp = effectiveAnnouncedIp
-        ? { ip: WEBRTC_LISTEN_IP, announcedIp: effectiveAnnouncedIp }
-        : { ip: WEBRTC_LISTEN_IP };
-
-      const transport = await router.createWebRtcTransport({
-        listenIps: [listenIp],
-        enableUdp: true,
-        enableTcp: true,
-        preferUdp: true,
-        initialAvailableOutgoingBitrate: 1200000
-      });
-
-      transport.appData = { socketId: socket.id, direction: direction || "send" };
-
-      transport.on("dtlsstatechange", (dtlsState) => {
-        if (dtlsState === "closed") {
-          try { transport.close(); } catch (_) {}
-        }
-      });
-
-      transport.on("close", () => {
-        if (peer.transports) peer.transports.delete(transport.id);
-      });
-
-      peer.transports.set(transport.id, transport);
-
-      callback && callback({
-        ok: true,
-        id: transport.id,
-        iceParameters: transport.iceParameters,
-        iceCandidates: transport.iceCandidates,
-        dtlsParameters: transport.dtlsParameters
-      });
-    } catch (error) {
-      console.error("voiceCreateTransport error:", error);
-      callback && callback({ ok: false, error: "voiceCreateTransport failed" });
-    }
-  });
-
-  socket.on("voiceConnectTransport", async ({ transportId, dtlsParameters } = {}, callback) => {
-    try {
-      if (!socket.room || !rooms[socket.room]) {
-        callback && callback({ ok: false, error: "Room not found" });
-        return;
-      }
-      const peer = ensureVoicePeer(socket.room, socket.id);
-      const transport = peer.transports.get(transportId);
-      if (!transport) {
-        callback && callback({ ok: false, error: "Transport not found" });
-        return;
-      }
-
-      await transport.connect({ dtlsParameters });
-      callback && callback({ ok: true });
-    } catch (error) {
-      console.error("voiceConnectTransport error:", error);
-      callback && callback({ ok: false, error: "voiceConnectTransport failed" });
-    }
-  });
-
-  socket.on("voiceProduce", async ({ transportId, kind, rtpParameters } = {}, callback) => {
-    try {
-      if (!socket.room || !rooms[socket.room]) {
-        callback && callback({ ok: false, error: "Room not found" });
-        return;
-      }
-      const peer = ensureVoicePeer(socket.room, socket.id);
-      const transport = peer.transports.get(transportId);
-      if (!transport) {
-        callback && callback({ ok: false, error: "Transport not found" });
-        return;
-      }
-
-      const producer = await transport.produce({
-        kind,
-        rtpParameters,
-        appData: { socketId: socket.id }
-      });
-
-      peer.producers.set(producer.id, producer);
-
-      producer.on("transportclose", () => {
-        peer.producers.delete(producer.id);
-      });
-
-      producer.on("close", () => {
-        peer.producers.delete(producer.id);
-      });
-
-      socket.to(socket.room).emit("voiceNewProducer", {
-        producerId: producer.id,
-        socketId: socket.id,
-        nickname: socket.nickname || "Anonymous"
-      });
-
-      callback && callback({ ok: true, id: producer.id });
-    } catch (error) {
-      console.error("voiceProduce error:", error);
-      callback && callback({ ok: false, error: "voiceProduce failed" });
-    }
-  });
-
-  socket.on("voiceConsume", async ({ transportId, producerId, rtpCapabilities } = {}, callback) => {
-    try {
-      if (!socket.room || !rooms[socket.room]) {
-        callback && callback({ ok: false, error: "Room not found" });
-        return;
-      }
-      const roomData = rooms[socket.room];
-      const router = roomData.voiceRouter;
-      if (!router) {
-        callback && callback({ ok: false, error: "Voice router not found" });
-        return;
-      }
-      if (!router.canConsume({ producerId, rtpCapabilities })) {
-        callback && callback({ ok: false, error: "Cannot consume this producer" });
-        return;
-      }
-
-      const peer = ensureVoicePeer(socket.room, socket.id);
-      const transport = peer.transports.get(transportId);
-      if (!transport) {
-        callback && callback({ ok: false, error: "Transport not found" });
-        return;
-      }
-
-      const consumer = await transport.consume({
-        producerId,
-        rtpCapabilities,
-        paused: true
-      });
-
-      peer.consumers.set(consumer.id, consumer);
-
-      consumer.on("transportclose", () => {
-        peer.consumers.delete(consumer.id);
-      });
-
-      consumer.on("producerclose", () => {
-        peer.consumers.delete(consumer.id);
-        socket.emit("voiceProducerClosed", { producerId });
-      });
-
-      callback && callback({
-        ok: true,
-        id: consumer.id,
-        producerId,
-        kind: consumer.kind,
-        rtpParameters: consumer.rtpParameters
-      });
-    } catch (error) {
-      console.error("voiceConsume error:", error);
-      callback && callback({ ok: false, error: "voiceConsume failed" });
-    }
-  });
-
-  socket.on("voiceResumeConsumer", async ({ consumerId } = {}, callback) => {
-    try {
-      if (!socket.room || !rooms[socket.room]) {
-        callback && callback({ ok: false, error: "Room not found" });
-        return;
-      }
-
-      const peer = ensureVoicePeer(socket.room, socket.id);
-      const consumer = peer.consumers.get(consumerId);
-      if (!consumer) {
-        callback && callback({ ok: false, error: "Consumer not found" });
-        return;
-      }
-
-      await consumer.resume();
-      callback && callback({ ok: true });
-    } catch (error) {
-      console.error("voiceResumeConsumer error:", error);
-      callback && callback({ ok: false, error: "voiceResumeConsumer failed" });
-    }
+    io.to(to).emit("voiceSignal", {
+      from: socket.id,
+      nickname: socket.nickname || "Anonymous",
+      data
+    });
   });
 
   socket.on("voiceLeave", (_, callback) => {
@@ -758,8 +687,8 @@ io.on("connection", (socket) => {
     msg = msg.trim();
     if (!msg || msg.length > MAX_MSG_LEN) return;
 
-    msg = msg.replace(/[<>]/g, "");
-
+    // We allow any printable characters in chat messages. XSS protection happens
+    // when the message is rendered on the client by escaping HTML and sanitizing URLs.
     const messageData = {
       msg: msg,
       nickname: socket.nickname,
@@ -772,9 +701,9 @@ io.on("connection", (socket) => {
   });
 
 
-  socket.on("uploadMedia", (data) => {
+  socket.on("uploadMedia", async (data) => {
     if (!socket.room || !rooms[socket.room]) {
-      console.error('No room or user not in room');
+      console.error("No room or user not in room");
       socket.emit("mediaError", "You are not in a room");
       return;
     }
@@ -782,117 +711,252 @@ io.on("connection", (socket) => {
     if (!fileUploadLimiter.isAllowed(socket.id)) {
       const remainingWait = fileUploadLimiter.getRemainingTime(socket.id);
       socket.emit("mediaError", `Upload limit reached. Try again in ${remainingWait}s`);
-      console.warn(`⚠️ File upload rate limit: ${socket.nickname || 'Anonymous'} blocked for ${remainingWait}s`);
+      console.warn(`⚠️ File upload rate limit: ${socket.nickname || "Anonymous"} blocked for ${remainingWait}s`);
       return;
     }
 
     try {
-      if (!data || typeof data !== 'object') {
-            console.error('Invalid data format');
-            return;
+      if (!data || typeof data !== "object") {
+        console.error("Invalid data format");
+        socket.emit("mediaError", "Invalid file payload");
+        return;
       }
 
       const { fileName, fileType, fileData, fileSize, thumbnail } = data;
 
-      if (!fileName || !fileType || !fileData || !fileSize) {
-            console.error('Missing required fields');
-            return;
+      if (!fileName || !fileData) {
+        console.error("Missing required fields");
+        socket.emit("mediaError", "Invalid file payload");
+        return;
       }
-   
-      if (fileSize > MAX_FILE_SIZE) {
-        console.error('File too large:', fileSize);
+
+      if (typeof fileSize === "number" && fileSize > MAX_FILE_SIZE) {
+        console.error("File too large:", fileSize);
         socket.emit("mediaError", "File is too large (max 50MB)");
         return;
       }
-    
-      if (!fileData || fileData.length < 4) {
-        console.error('Invalid file data length:', fileData?.length);
-        socket.emit("mediaError", "Invalid file data");
-        return;
-      }
 
-   
-      const sanitizedFileName = sanitizeUploadName(fileName);
-      const fileExt = getStoredFileExtension(sanitizedFileName, fileType);
-      const uniqueName = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}.${fileExt}`;
-      const filePath = path.join(UPLOADS_DIR, uniqueName);
-      
-      if (!roomFiles[socket.room]) {
-        roomFiles[socket.room] = [];
-      }
-      roomFiles[socket.room].push(uniqueName);
-      
       let buffer;
       try {
-        buffer = Buffer.from(fileData, 'base64');
+        buffer = typeof fileData === "string"
+          ? Buffer.from(fileData, "base64")
+          : decodeChunkData(fileData);
       } catch (bufferError) {
-        console.error('Buffer creation error:', bufferError);
+        console.error("Buffer creation error:", bufferError);
         socket.emit("mediaError", "File data corrupted");
         return;
       }
-      
+
       if (!buffer || buffer.length === 0) {
-        console.error('Buffer too small:', buffer?.length);
+        console.error("Buffer too small:", buffer?.length);
         socket.emit("mediaError", "File data is empty");
         return;
       }
-      
-      fs.writeFile(filePath, buffer, (writeError) => {
-        if (writeError) {
-          console.error('File write error:', writeError);
-          socket.emit("mediaError", "Failed to save file");
-          return;
-        }
-        
-        const inlinePreview = isInlineUpload(fileType);
-        uploadedFiles[uniqueName] = {
-          originalName: sanitizedFileName.substring(0, 100),
-          mimeType: typeof fileType === "string" ? fileType : "application/octet-stream",
-          inlinePreview
-        };
 
-        const mediaMsg = {
-          type: "media",
-          fileName: sanitizedFileName.substring(0, 100),
-          fileUrl: `/uploads/${uniqueName}`,
-          fileType: fileType,
-          fileSize: fileSize,
-          thumbnail: inlinePreview && fileType.startsWith('image/') ? thumbnail || null : null,
-          isImage: typeof fileType === "string" && fileType.startsWith('image/'),
-          isVideo: typeof fileType === "string" && fileType.startsWith('video/'),
-          isGenericFile: !(typeof fileType === "string" && (fileType.startsWith('image/') || fileType.startsWith('video/'))),
-          nickname: socket.nickname,
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          self: false,
-          metadataStripped: inlinePreview 
-        };
-
-        socket.to(socket.room).emit("chatMessage", mediaMsg);
-        socket.emit("chatMessage", { ...mediaMsg, self: true });
+      await saveUploadedMedia(socket, {
+        fileName,
+        fileType: fileType || "application/octet-stream",
+        fileSize: buffer.length,
+        thumbnail,
+        buffer
       });
-
     } catch (error) {
       console.error("✗ Upload error:", error);
-      console.error("Error stack:", error.stack);
-      socket.emit("mediaError", "Upload failed: " + error.message);
+      socket.emit("mediaError", "Upload failed");
     }
+  });
+
+  socket.on("uploadMediaChunk", async (data, callback) => {
+    const ack = (result) => {
+      if (typeof callback === "function") callback(result);
+    };
+
+    if (!socket.room || !rooms[socket.room]) {
+      const result = { ok: false, error: "You are not in a room" };
+      socket.emit("mediaError", result.error);
+      ack(result);
+      return;
+    }
+
+    if (!data || typeof data !== "object") {
+      const result = { ok: false, error: "Invalid upload chunk" };
+      socket.emit("mediaError", result.error);
+      ack(result);
+      return;
+    }
+
+    const {
+      uploadId,
+      fileName,
+      fileType,
+      fileSize,
+      thumbnail,
+      chunkIndex,
+      totalChunks,
+      chunkData
+    } = data;
+
+    if (
+      !uploadId ||
+      typeof uploadId !== "string" ||
+      !/^[a-zA-Z0-9._-]{1,80}$/.test(uploadId) ||
+      typeof chunkIndex !== "number" ||
+      !Number.isInteger(chunkIndex) ||
+      chunkIndex < 0 ||
+      typeof totalChunks !== "number" ||
+      !Number.isInteger(totalChunks) ||
+      totalChunks < 1 ||
+      totalChunks > 500 ||
+      chunkIndex >= totalChunks ||
+      chunkData == null
+    ) {
+      const result = { ok: false, error: "Invalid upload chunk metadata" };
+      socket.emit("mediaError", result.error);
+      ack(result);
+      return;
+    }
+
+    if (typeof fileSize === "number" && fileSize > MAX_FILE_SIZE) {
+      const result = { ok: false, error: "File is too large (max 50MB)" };
+      socket.emit("mediaError", result.error);
+      ack(result);
+      return;
+    }
+
+    const storeKey = `${socket.id}:${uploadId}`;
+    let uploadStore = pendingUploads[storeKey];
+
+    if (!uploadStore) {
+      if (chunkIndex !== 0) {
+        const result = { ok: false, error: "Upload session expired" };
+        socket.emit("mediaError", result.error);
+        ack(result);
+        return;
+      }
+
+      if (!fileUploadLimiter.isAllowed(socket.id)) {
+        const remainingWait = fileUploadLimiter.getRemainingTime(socket.id);
+        const result = { ok: false, error: `Upload limit reached. Try again in ${remainingWait}s` };
+        socket.emit("mediaError", result.error);
+        ack(result);
+        return;
+      }
+
+      if (!fileName) {
+        const result = { ok: false, error: "Invalid file payload" };
+        socket.emit("mediaError", result.error);
+        ack(result);
+        return;
+      }
+
+      // Limit concurrent unfinished uploads per socket
+      const activeForSocket = Object.keys(pendingUploads).filter((key) => key.startsWith(`${socket.id}:`)).length;
+      if (activeForSocket >= 3) {
+        const result = { ok: false, error: "Too many uploads in progress" };
+        socket.emit("mediaError", result.error);
+        ack(result);
+        return;
+      }
+
+      uploadStore = {
+        fileName,
+        fileType: fileType || "application/octet-stream",
+        fileSize: typeof fileSize === "number" ? fileSize : null,
+        thumbnail: thumbnail || null,
+        totalChunks,
+        chunks: new Array(totalChunks),
+        receivedCount: 0,
+        receivedBytes: 0,
+        finalizing: false,
+        createdAt: Date.now()
+      };
+      pendingUploads[storeKey] = uploadStore;
+    }
+
+    if (uploadStore.finalizing) {
+      ack({ ok: true, duplicate: true });
+      return;
+    }
+
+    if (uploadStore.totalChunks !== totalChunks) {
+      cleanupPendingUpload(storeKey);
+      const result = { ok: false, error: "Upload metadata mismatch" };
+      socket.emit("mediaError", result.error);
+      ack(result);
+      return;
+    }
+
+    let buffer;
+    try {
+      buffer = decodeChunkData(chunkData);
+    } catch (bufferError) {
+      cleanupPendingUpload(storeKey);
+      const result = { ok: false, error: "File data corrupted" };
+      socket.emit("mediaError", result.error);
+      ack(result);
+      return;
+    }
+
+    if (!buffer || buffer.length === 0) {
+      cleanupPendingUpload(storeKey);
+      const result = { ok: false, error: "Empty chunk received" };
+      socket.emit("mediaError", result.error);
+      ack(result);
+      return;
+    }
+
+    // Chunk size must match the sender's negotiated upload size and allow larger
+    // images/files to be split into multiple safe chunks.
+    if (buffer.length > MAX_CHUNK_BYTES) {
+      cleanupPendingUpload(storeKey);
+      const result = { ok: false, error: "Chunk too large" };
+      socket.emit("mediaError", result.error);
+      ack(result);
+      return;
+    }
+
+    if (!Buffer.isBuffer(uploadStore.chunks[chunkIndex])) {
+      uploadStore.chunks[chunkIndex] = buffer;
+      uploadStore.receivedCount += 1;
+      uploadStore.receivedBytes += buffer.length;
+
+      if (uploadStore.receivedBytes > MAX_FILE_SIZE) {
+        cleanupPendingUpload(storeKey);
+        const result = { ok: false, error: "File is too large (max 50MB)" };
+        socket.emit("mediaError", result.error);
+        ack(result);
+        return;
+      }
+    }
+
+    if (uploadStore.receivedCount >= uploadStore.totalChunks) {
+      const saved = await finalizeChunkedUpload(socket, storeKey);
+      if (saved) {
+        ack({ ok: true, complete: true });
+      } else {
+        ack({ ok: false, error: "Failed to process uploaded file" });
+      }
+      return;
+    }
+
+    ack({ ok: true, chunkIndex, receivedCount: uploadStore.receivedCount });
   });
 
   socket.on("typing", () => {
     if (!socket.room || !rooms[socket.room]) return;
-    
+
     socket.to(socket.room).emit("userTyping", {
-        userId: socket.id,
-        nickname: socket.nickname
-      });
+      userId: socket.id,
+      nickname: socket.nickname
+    });
   });
 
   socket.on("stopTyping", () => {
-      if (!socket.room || !rooms[socket.room]) return;
-    
-      socket.to(socket.room).emit("userStoppedTyping", {
-          userId: socket.id
-      });
+    if (!socket.room || !rooms[socket.room]) return;
+
+    socket.to(socket.room).emit("userStoppedTyping", {
+      userId: socket.id
+    });
   });
 
   socket.onAny((eventName, data) => {
@@ -917,6 +981,9 @@ io.on("connection", (socket) => {
     
     roomCreationLimiter.attempts.delete(socket.id);
     fileUploadLimiter.attempts.delete(socket.id);
+    Object.keys(pendingUploads)
+      .filter((key) => key.startsWith(`${socket.id}:`))
+      .forEach((key) => cleanupPendingUpload(key));
     
     if (socket.room && rooms[socket.room]) {
       leaveVoice(socket);
@@ -939,7 +1006,6 @@ io.on("connection", (socket) => {
           setTimeout(() => {
             if (rooms[socket.room] && Object.keys(rooms[socket.room].users).length === 0) {
               deleteRoomFiles(socket.room);
-              closeRoomVoice(socket.room);
               delete rooms[socket.room];
             }
           }, 300000); 
@@ -950,78 +1016,8 @@ io.on("connection", (socket) => {
 });
 
 
-app.get('/uploads/:filename', (req, res) => {
-  const requestedFile = path.basename(req.params.filename || "");
-  if (!requestedFile || requestedFile !== req.params.filename) {
-    res.status(400).send('Invalid file name');
-    return;
-  }
-
-  const filePath = path.join(UPLOADS_DIR, requestedFile);
-  const meta = uploadedFiles[requestedFile];
-  
-  if (fs.existsSync(filePath)) {
-    if (meta?.mimeType) {
-      res.type(meta.mimeType);
-    }
-
-    if (!meta?.inlinePreview) {
-      res.setHeader(
-        "Content-Disposition",
-        `attachment; filename="${(meta?.originalName || requestedFile).replace(/"/g, "")}"`
-      );
-    }
-    res.sendFile(filePath);
-  } else {
-    console.error(`File not found: ${req.params.filename}`);
-    res.status(404).send('File not found');
-  }
-});
-
-app.use((req, res, next) => {
-    res.setHeader("Content-Security-Policy", 
-        "default-src 'self'; " +
-        "img-src 'self' data: blob:; " +
-        "media-src 'self' blob:; " +
-        "script-src 'self'; " +
-        "style-src 'self' 'unsafe-inline'; " + 
-        "font-src 'self' data:; " +
-        "connect-src 'self' ws: wss:;"
-    );
-    
-    res.setHeader("X-Content-Type-Options", "nosniff");
-    res.setHeader("X-Frame-Options", "DENY");
-    res.setHeader("X-XSS-Protection", "1; mode=block");
-    
-    next();
-});
-
-
 const PORT = process.env.PORT || 3000;
 
-async function startServer() {
-  if (!effectiveAnnouncedIp) {
-    if (WEBRTC_LISTEN_IP === "127.0.0.1") {
-      effectiveAnnouncedIp = undefined;
-    } else if (SERVER_HOST === "127.0.0.1" || SERVER_HOST === "localhost") {
-      effectiveAnnouncedIp = undefined;
-    } else {
-      effectiveAnnouncedIp = detectLocalIPv4() || undefined;
-    }
-  }
-
-  await initMediasoupWorker();
-  if (WEBRTC_LISTEN_IP === "0.0.0.0" && !effectiveAnnouncedIp) {
-    console.warn("⚠️ Could not detect WEBRTC announced IP. Set WEBRTC_ANNOUNCED_IP manually for remote clients.");
-  }
-
-  server.listen(PORT, SERVER_HOST, () => {
-    console.log(`🚀 Server running on http://${SERVER_HOST}:${PORT}`);
-    console.log(`🎙️ Voice SFU ready (listen ${WEBRTC_LISTEN_IP}, announced ${effectiveAnnouncedIp || "none"}, UDP/TCP ${WEBRTC_MIN_PORT}-${WEBRTC_MAX_PORT})`);
-  });
-}
-
-startServer().catch((error) => {
-  console.error("Failed to start server:", error);
-  process.exit(1);
+server.listen(PORT, SERVER_HOST, () => {
+  console.log(`Server running on http://${SERVER_HOST}:${PORT}`);
 });

@@ -36,27 +36,38 @@ let voiceJoined = false;
 let voiceMuted = false;
 let voiceDeafened = false;
 let voiceLocalStream = null;
-let voiceDevice = null;
-let voiceSendTransport = null;
-let voiceRecvTransport = null;
-let voiceProducer = null;
-let voiceConsumers = new Map();
+let voicePeerConnections = new Map();
 let voiceAudioElements = new Map();
-let voiceConsumeQueue = new Set();
-let voiceProducerOwners = new Map();
 let voiceUserVolumes = new Map();
 let voiceVadContext = null;
 let voiceVadAnalyser = null;
 let voiceVadTimer = null;
+let voiceVadNoiseFloor = 0.6;
+let voiceVadAboveCount = 0;
+let voiceVadLastAboveTime = 0;
 let voiceSpeaking = false;
 let voiceParticipants = new Map();
 let voiceNeedsUnlock = false;
 let voiceUnlockHintShown = false;
 let voiceContextMenu = null;
 
+const GENERIC_ERROR_MESSAGE = "Something went wrong. Please try again.";
 const MAX_UPLOAD_SIZE = 50 * 1024 * 1024;
+// Keep the raw chunk far below the server limit so base64 transport never trips
+// the server with larger images or videos.
+const CHUNK_SIZE = 512 * 1024;
+const THUMBNAIL_SIZE_LIMIT = 8 * 1024 * 1024;
 const MAX_CHAT_LENGTH = 4000;
 const DEFAULT_VOICE_USER_VOLUME = 100;
+const VOICE_ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" }
+];
+const VOICE_VAD_INTERVAL_MS = 60;
+const VOICE_VAD_ONSET_FRAMES = 2;
+const VOICE_VAD_HANGOVER_MS = 400;
+const VOICE_VAD_MARGIN = 3.5;
+const VOICE_VAD_NOISE_SMOOTHING = 0.05;
 
 function normalizeUploadMime(file) {
   if (file && typeof file.type === "string" && file.type.trim()) {
@@ -84,11 +95,12 @@ function getFileEmoji(fileType = "", fileName = "") {
 }
 
 function buildThumbnailAndSend(file, fileData) {
-  if (!isPreviewableImage(file.type)) {
+  if (!isPreviewableImage(file.type) || file.size > THUMBNAIL_SIZE_LIMIT) {
     sendMediaToServer(file, fileData, null);
     return;
   }
 
+  const objectUrl = URL.createObjectURL(file);
   const img = new Image();
   img.onload = function() {
     const canvas = document.createElement('canvas');
@@ -98,11 +110,13 @@ function buildThumbnailAndSend(file, fileData) {
     ctx.drawImage(img, 0, 0, 150, 150);
     const thumbnail = canvas.toDataURL('image/jpeg', 0.7);
     sendMediaToServer(file, fileData, thumbnail);
+    URL.revokeObjectURL(objectUrl);
   };
   img.onerror = function() {
     sendMediaToServer(file, fileData, null);
+    URL.revokeObjectURL(objectUrl);
   };
-  img.src = `data:${normalizeUploadMime(file)};base64,${fileData}`;
+  img.src = objectUrl;
 }
 
 function resizeChatInput() {
@@ -249,13 +263,14 @@ function updateTypingIndicator() {
     }
     
     const users = Array.from(typingUsers.values());
-    const firstUser = users[0];
+    const firstUser = String(users[0] || "Someone");
+    const safeFirstUser = escapeHtml(firstUser);
     let dots = '<span class="typing-dots"><span></span><span></span><span></span></span>';
     
     currentIndicator.innerHTML = `
         <i class="fas fa-keyboard"></i>
         <span class="typing-text">
-            <span class="username">${firstUser}</span> is typing${dots}
+            <span class="username">${safeFirstUser}</span> is typing${dots}
         </span>
     `;
     
@@ -263,7 +278,7 @@ function updateTypingIndicator() {
         currentIndicator.innerHTML = `
             <i class="fas fa-keyboard"></i>
             <span class="typing-text">
-                <span class="username">${firstUser}</span> and ${users.length - 1} more are typing${dots}
+                <span class="username">${safeFirstUser}</span> and ${users.length - 1} more are typing${dots}
             </span>
         `;
     }
@@ -377,12 +392,38 @@ function leaveRoom() {
   }
 }
 
+function getErrorMessage(payload, fallback = "An unexpected error occurred") {
+  if (typeof payload === "string") {
+    const message = payload.trim();
+    return message || fallback;
+  }
+
+  if (payload && typeof payload === "object") {
+    if (typeof payload.message === "string" && payload.message.trim()) {
+      return payload.message.trim();
+    }
+    if (typeof payload.error === "string" && payload.error.trim()) {
+      return payload.error.trim();
+    }
+  }
+
+  return fallback;
+}
+
 function showError(msg) {
-  loginError.textContent = msg;
-  loginError.style.animation = "none";
-  setTimeout(() => {
-    loginError.style.animation = "errorFlash 0.5s";
-  }, 10);
+  const message = getErrorMessage(msg);
+
+  if (loginError) {
+    loginError.textContent = message;
+    loginError.style.animation = "none";
+    setTimeout(() => {
+      loginError.style.animation = "errorFlash 0.5s";
+    }, 10);
+    return;
+  }
+
+  console.error(message);
+  window.alert(message);
 }
 
 function safeText(text) {
@@ -421,8 +462,25 @@ function safeMediaURL(url) {
     return '#'; 
 }
 
+socket.on("error", (payload) => {
+  console.error("Socket error:", payload);
+  showError(GENERIC_ERROR_MESSAGE);
+});
+
+socket.on("connect_error", (error) => {
+  console.error("Connection error:", error);
+  showError(GENERIC_ERROR_MESSAGE);
+});
+
+socket.on("disconnect", (reason) => {
+  if (reason === "io client disconnect") return;
+  console.error("Disconnected:", reason);
+  showError(GENERIC_ERROR_MESSAGE);
+});
+
 socket.on("roomError", (msg) => {
-  showError(msg);
+  console.error("Room error:", msg);
+  showError(GENERIC_ERROR_MESSAGE);
 });
 
 socket.on("roomJoined", (data) => {
@@ -497,122 +555,130 @@ function sendMessage() {
 }
 
 function createMediaUploadButton() {
-  let mediaInput = document.getElementById('mediaUploadInput');
-  if (!mediaInput) {
-    mediaInput = document.createElement('input');
-    mediaInput.type = 'file';
-    mediaInput.id = 'mediaUploadInput';
-    mediaInput.accept = 'image/*,video/*';
-    mediaInput.multiple = false;
-    mediaInput.style.display = 'none';
-    document.body.appendChild(mediaInput);
-  }
-
-  let fileInput = document.getElementById('fileUploadInput');
-  if (!fileInput) {
-    fileInput = document.createElement('input');
-    fileInput.type = 'file';
-    fileInput.id = 'fileUploadInput';
-    fileInput.accept = '*/*';
-    fileInput.multiple = false;
-    fileInput.style.display = 'none';
-    document.body.appendChild(fileInput);
+  let uploadInput = document.getElementById('mediaUploadInput');
+  if (!uploadInput) {
+    uploadInput = document.createElement('input');
+    uploadInput.type = 'file';
+    uploadInput.id = 'mediaUploadInput';
+    uploadInput.multiple = false;
+    uploadInput.style.display = 'none';
+    document.body.appendChild(uploadInput);
   }
 
   const inputWrapper = document.querySelector('.input-wrapper');
   if (!inputWrapper) return;
 
-  let mediaBtn = document.getElementById('mediaUploadBtn');
-  if (!mediaBtn) {
-    mediaBtn = document.createElement('button');
-    mediaBtn.id = 'mediaUploadBtn';
-    mediaBtn.type = 'button';
-    mediaBtn.className = 'upload-action-btn';
-    mediaBtn.innerHTML = '<span aria-hidden="true">📸</span>';
-    mediaBtn.title = 'Upload photo or video';
-    mediaBtn.setAttribute('aria-label', 'Upload photo or video');
-    mediaBtn.addEventListener('click', () => {
-      mediaInput.click();
+  let uploadBtn = document.getElementById('mediaUploadBtn');
+  if (!uploadBtn) {
+    uploadBtn = document.createElement('button');
+    uploadBtn.id = 'mediaUploadBtn';
+    uploadBtn.type = 'button';
+    uploadBtn.className = 'upload-action-btn';
+    uploadBtn.innerHTML = '<span aria-hidden="true">📎</span>';
+    uploadBtn.title = 'Upload photo, video or file';
+    uploadBtn.setAttribute('aria-label', 'Upload photo, video or file');
+    uploadBtn.addEventListener('click', () => {
+      uploadInput.click();
     });
-    inputWrapper.appendChild(mediaBtn);
+    inputWrapper.appendChild(uploadBtn);
   }
 
-  let fileBtn = document.getElementById('fileUploadBtn');
-  if (!fileBtn) {
-    fileBtn = document.createElement('button');
-    fileBtn.id = 'fileUploadBtn';
-    fileBtn.type = 'button';
-    fileBtn.className = 'upload-action-btn upload-action-btn-file';
-    fileBtn.innerHTML = '<span aria-hidden="true">📎</span>';
-    fileBtn.title = 'Upload any file';
-    fileBtn.setAttribute('aria-label', 'Upload file');
-    fileBtn.addEventListener('click', () => {
-      fileInput.click();
-    });
-    inputWrapper.appendChild(fileBtn);
-  }
-
-  if (!mediaInput.dataset.bound) {
-    mediaInput.addEventListener('change', () => {
-      if (mediaInput.files.length > 0) {
-        uploadMedia(mediaInput.files[0]);
-        mediaInput.value = '';
+  if (!uploadInput.dataset.bound) {
+    uploadInput.addEventListener('change', () => {
+      if (uploadInput.files.length > 0) {
+        uploadMedia(uploadInput.files[0]);
+        uploadInput.value = '';
       }
     });
-    mediaInput.dataset.bound = 'true';
-  }
-
-  if (!fileInput.dataset.bound) {
-    fileInput.addEventListener('change', () => {
-      if (fileInput.files.length > 0) {
-        uploadMedia(fileInput.files[0]);
-        fileInput.value = '';
-      }
-    });
-    fileInput.dataset.bound = 'true';
+    uploadInput.dataset.bound = 'true';
   }
 }
 
-function uploadMedia(file) {
-  if (!file) return;
-  
-  if (file.size > MAX_UPLOAD_SIZE) {
-    alert("File is too large (max 50MB)");
+function uint8ToBase64(bytes) {
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function emitUploadChunk(payload) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error("Upload timed out"));
+    }, 60000);
+
+    try {
+      socket.timeout(60000).emit("uploadMediaChunk", payload, (err, response) => {
+        clearTimeout(timer);
+        if (err) {
+          reject(err instanceof Error ? err : new Error("Upload timed out"));
+          return;
+        }
+        if (!response || response.ok === false) {
+          reject(new Error((response && response.error) || "Upload failed"));
+          return;
+        }
+        resolve(response);
+      });
+    } catch (emitError) {
+      clearTimeout(timer);
+      reject(emitError);
+    }
+  });
+}
+
+async function sendMediaToServer(file, fileData, thumbnail) {
+  const bytes = fileData instanceof ArrayBuffer
+    ? new Uint8Array(fileData)
+    : new Uint8Array(fileData);
+
+  if (!bytes.byteLength) {
+    console.error("Upload failed: empty file", file.name);
+    addSystemMessage(`>>> ${GENERIC_ERROR_MESSAGE}`);
     return;
   }
-  
-  const reader = new FileReader();
-  
-  reader.onload = function(e) {
-    const fileData = e.target.result.split(',')[1];
-    buildThumbnailAndSend(file, fileData);
-  };
-  
-  reader.onerror = (error) => {
-    console.error("File read error:", error);
-    addSystemMessage(`>>> Upload failed: ${file.name}`);
-  };
-  
-  reader.readAsDataURL(file);
-}
 
-function sendMediaToServer(file, fileData, thumbnail) {
-  // addSystemMessage(`>>> UPLOADING ${file.name} (METADATA WILL BE REMOVED)...`);
-  
-  const fileInfo = {
-    fileName: file.name,
-    fileType: normalizeUploadMime(file),
-    fileSize: file.size,
-    fileData: fileData,
-    thumbnail: thumbnail,
-    metadataStripped: isPreviewableImage(file.type) || file.type.startsWith('video/')
-  };
-  
-  socket.emit("uploadMedia", fileInfo);
+  const uploadId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  const totalChunks = Math.max(1, Math.ceil(bytes.byteLength / CHUNK_SIZE));
+  const fileType = normalizeUploadMime(file);
+
+  try {
+    for (let index = 0; index < totalChunks; index += 1) {
+      const start = index * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, bytes.byteLength);
+      const chunk = bytes.subarray(start, end);
+
+      // Base64 keeps chunk payloads reliable across Socket.IO transports.
+      const response = await emitUploadChunk({
+        uploadId,
+        fileName: file.name || "file",
+        fileType,
+        fileSize: file.size || bytes.byteLength,
+        thumbnail: index === 0 ? thumbnail : null,
+        chunkIndex: index,
+        totalChunks,
+        chunkData: uint8ToBase64(chunk)
+      });
+
+      if (response.complete) {
+        return;
+      }
+    }
+  } catch (error) {
+    console.error("Upload failed:", file.name, error);
+    const message = error && error.message ? String(error.message) : "unknown error";
+    // Server-side failures already arrive via the mediaError event.
+    if (/timed out|network|disconnected|Upload failed$/i.test(message)) {
+      addSystemMessage(`>>> ${GENERIC_ERROR_MESSAGE}`);
+    }
+  }
 }
 
 socket.on("mediaError", (msg) => {
-  addSystemMessage(`>>> MEDIA ERROR: ${msg}`);
+  console.error("Media error:", msg);
+  addSystemMessage(`>>> ${GENERIC_ERROR_MESSAGE}`);
 });
 
 socket.on("chatMessage", (data) => {
@@ -626,13 +692,15 @@ socket.on("chatMessage", (data) => {
 function addTextMessage(data) {
   const messageDiv = document.createElement("div");
   const messageHtml = linkifyMessageText(data.msg);
+  const nickname = escapeHtml(String(data.nickname || ""));
+  const time = escapeHtml(String(data.time || ""));
   
   if (data.self) {
     messageDiv.className = "message-self";
     messageDiv.innerHTML = `
       <div class="message-header">
-        <span class="message-nickname">${data.nickname}</span>
-        <span class="message-time">${data.time}</span>
+        <span class="message-nickname">${nickname}</span>
+        <span class="message-time">${time}</span>
       </div>
       <div class="message-content">${messageHtml}</div>
     `;
@@ -640,8 +708,8 @@ function addTextMessage(data) {
     messageDiv.className = "message-other";
     messageDiv.innerHTML = `
       <div class="message-header">
-        <span class="message-nickname">${data.nickname}</span>
-        <span class="message-time">${data.time}</span>
+        <span class="message-nickname">${nickname}</span>
+        <span class="message-time">${time}</span>
       </div>
       <div class="message-content">${messageHtml}</div>
     `;
@@ -662,11 +730,10 @@ function addMediaMessage(data) {
   if (data.isImage) {
     mediaContent = `
       <div class="media-preview">
-        <img src="${safeMediaURL(data.thumbnail || data.fileUrl)}" 
+        <img src="${safeMediaURL(data.thumbnail || data.fileUrl)}"
              alt="${escapeHtml(data.fileName)}"
              class="media-thumbnail"
-             onclick="event.stopPropagation(); openFullImage('${safeMediaURL(data.fileUrl)}'); return false;"
-             ontouchstart="event.stopPropagation();">
+             data-full-url="${safeMediaURL(data.fileUrl)}">
         <div class="media-info">
           <strong>📸 ${escapeHtml(data.fileName)}</strong>
           <small>${fileSize}</small>
@@ -716,6 +783,10 @@ function addMediaMessage(data) {
   const zoomableMedia = messageDiv.querySelector(".media-thumbnail");
   if (zoomableMedia) {
     attachPreviewZoom(zoomableMedia);
+    zoomableMedia.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openFullImage(zoomableMedia.dataset.fullUrl);
+    });
   }
   scrollToBottom();
 }
@@ -773,72 +844,26 @@ function attachPreviewZoom(mediaEl) {
   mediaEl.dataset.zoomBound = "true";
 }
 
-window.openFullImage = function(url) {
-  if (!url.startsWith('/uploads/')) {
-        console.error('Invalid image URL');
-        return;
-    }
+function handleVideoFullscreenChange() {
+  const fsEl = document.fullscreenElement
+    || document.webkitFullscreenElement
+    || document.mozFullScreenElement
+    || document.msFullscreenElement;
 
-  const filename = url.substring(9);
-    if (!/^[a-zA-Z0-9\.\-]+$/.test(filename)) {
-        console.error('Invalid filename');
-        return;
-    }
-
-  const modal = document.createElement('div');
-  modal.style.cssText = `
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0,0,0,0.9);
-    z-index: 9999;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-  `;
-  
-  const img = document.createElement('img');
-  img.src = url;
-  img.style.cssText = `
-    max-width: 90%;
-    max-height: 90%;
-    object-fit: contain;
-    border: 2px solid var(--neon-blue);
-    border-radius: 10px;
-  `;
-  
-  const closeBtn = document.createElement('button');
-  closeBtn.innerHTML = '✕';
-  closeBtn.style.cssText = `
-    position: absolute;
-    top: 20px;
-    right: 20px;
-    background: var(--neon-red);
-    color: white;
-    border: none;
-    border-radius: 50%;
-    width: 40px;
-    height: 40px;
-    font-size: 20px;
-    cursor: pointer;
-  `;
-  
-  closeBtn.addEventListener('click', () => {
-    document.body.removeChild(modal);
-  });
-  
-  modal.appendChild(img);
-  modal.appendChild(closeBtn);
-  document.body.appendChild(modal);
-  
-  modal.addEventListener('click', (e) => {
-    if (e.target === modal) {
-      document.body.removeChild(modal);
+  document.querySelectorAll(".media-video").forEach((videoEl) => {
+    if (videoEl === fsEl) {
+      videoEl.style.setProperty("border", "none", "important");
+      videoEl.style.setProperty("border-radius", "0", "important");
+    } else {
+      videoEl.style.removeProperty("border");
+      videoEl.style.removeProperty("border-radius");
     }
   });
-};
+}
+
+["fullscreenchange", "webkitfullscreenchange", "mozfullscreenchange", "MSFullscreenChange"].forEach((eventName) => {
+  document.addEventListener(eventName, handleVideoFullscreenChange);
+});
 
 function addSystemMessage(text) {
   const systemDiv = document.createElement("div");
@@ -941,40 +966,6 @@ function handleGlobalPaste(e) {
     }
 }
 
-function handleDragOver(e) {
-    e.preventDefault();
-    e.stopPropagation();
-    showDragIndicator();
-    
-    e.dataTransfer.dropEffect = 'copy';
-    document.body.style.cursor = 'copy';
-}
-
-function handleDragLeave(e) {
-    e.preventDefault();
-    e.stopPropagation();
-    
-    if (e.target === document || e.target === document.documentElement) {
-        hideDragIndicator();
-        document.body.style.cursor = '';
-    }
-}
-
-function handleGlobalDrop(e) {
-    e.preventDefault();
-    e.stopPropagation();
-    
-    hideDragIndicator();
-    document.body.style.cursor = '';
-    
-    const files = e.dataTransfer.files;
-    
-    if (files.length > 0 && chatScreen.style.display === 'block') {
-        processDroppedFiles(files);
-    }
-}
-
-
 function handleBrowserFileDrop(e) {
     if (e.dataTransfer.types.includes('Files')) {
         return;
@@ -1006,14 +997,6 @@ function showDragIndicator() {
     indicator.style.display = 'flex';
 }
 
-function hideDragIndicator() {
-    const indicator = document.getElementById('globalDragIndicator');
-    if (indicator) {
-        indicator.style.display = 'none';
-    }
-}
-
-
 function processDroppedFiles(files) {
     const validFiles = Array.from(files).filter(file => file instanceof File);
     
@@ -1036,26 +1019,32 @@ function processDroppedFiles(files) {
 
 function uploadMedia(file) {
     if (!file) return;
-    addUploadNotification(file);
-    
+
     if (file.size > MAX_UPLOAD_SIZE) {
         alert("File is too large (max 50MB)");
         return;
     }
-    
+
+    if (file.size === 0) {
+        console.error("Upload failed: empty file", file.name);
+        addSystemMessage(`>>> ${GENERIC_ERROR_MESSAGE}`);
+        return;
+    }
+
+    addUploadNotification(file);
+
     const reader = new FileReader();
-    
+
     reader.onload = function(e) {
-        const fileData = e.target.result.split(',')[1];
-        buildThumbnailAndSend(file, fileData);
+        buildThumbnailAndSend(file, e.target.result);
     };
-    
+
     reader.onerror = (error) => {
-        console.error("File read error:", error);
-        addSystemMessage(`>>> Upload failed: ${file.name}`);
+        console.error("File read error:", file.name, error);
+        addSystemMessage(`>>> ${GENERIC_ERROR_MESSAGE}`);
     };
-    
-    reader.readAsDataURL(file);
+
+    reader.readAsArrayBuffer(file);
 }
 
 function addUploadNotification(file) {
@@ -1080,8 +1069,6 @@ function resetVoiceStateUI() {
   voiceDeafened = false;
   voiceSpeaking = false;
   voiceParticipants.clear();
-  voiceConsumeQueue.clear();
-  voiceProducerOwners.clear();
   renderVoiceParticipants();
   updateVoiceButtons();
 }
@@ -1116,10 +1103,9 @@ function syncVoiceVolumeDisplay(socketId, sliderEl, valueEl, nextValue) {
 function applyVoiceUserVolume(socketId) {
   if (!socketId) return;
 
-  const volume = getVoiceUserVolume(socketId) / 100;
-  for (const [producerId, audioEl] of voiceAudioElements.entries()) {
-    if (voiceProducerOwners.get(producerId) !== socketId) continue;
-    audioEl.volume = volume;
+  const audioEl = voiceAudioElements.get(socketId);
+  if (audioEl) {
+    audioEl.volume = getVoiceUserVolume(socketId) / 100;
   }
 }
 
@@ -1290,6 +1276,10 @@ function startVoiceVad(stream) {
   voiceVadAnalyser.fftSize = 1024;
   source.connect(voiceVadAnalyser);
 
+  voiceVadNoiseFloor = 0.6;
+  voiceVadAboveCount = 0;
+  voiceVadLastAboveTime = 0;
+
   const data = new Uint8Array(voiceVadAnalyser.fftSize);
   voiceVadTimer = setInterval(() => {
     if (!voiceJoined || voiceMuted || voiceDeafened || !voiceVadAnalyser) {
@@ -1307,12 +1297,34 @@ function startVoiceVad(stream) {
     }
 
     const level = total / data.length;
-    const nowSpeaking = level > 3.2;
+    // Threshold rides just above the ambient noise floor instead of a fixed
+    // value, so it self-calibrates to each mic's gain/background noise.
+    const threshold = voiceVadNoiseFloor + VOICE_VAD_MARGIN;
+    const isAboveThreshold = level > threshold;
+    const now = Date.now();
+
+    if (isAboveThreshold) {
+      voiceVadAboveCount += 1;
+      voiceVadLastAboveTime = now;
+    } else {
+      voiceVadAboveCount = 0;
+      // Only drift the noise floor toward quiet samples, never while speaking,
+      // so a long sentence can't slowly raise the threshold out from under it.
+      voiceVadNoiseFloor = Math.min(20, Math.max(0.3,
+        voiceVadNoiseFloor + (level - voiceVadNoiseFloor) * VOICE_VAD_NOISE_SMOOTHING
+      ));
+    }
+
+    // Require a couple of consecutive loud frames to start (ignores clicks/pops),
+    // then hold "speaking" through brief pauses between words for a flicker-free indicator.
+    const withinHangover = voiceSpeaking && (now - voiceVadLastAboveTime) < VOICE_VAD_HANGOVER_MS;
+    const nowSpeaking = voiceVadAboveCount >= VOICE_VAD_ONSET_FRAMES || withinHangover;
+
     if (nowSpeaking !== voiceSpeaking) {
       voiceSpeaking = nowSpeaking;
       socket.emit("voiceStateUpdate", { speaking: nowSpeaking });
     }
-  }, 120);
+  }, VOICE_VAD_INTERVAL_MS);
 }
 
 function stopVoiceVad() {
@@ -1327,20 +1339,20 @@ function stopVoiceVad() {
   }
 }
 
-function cleanupConsumer(producerId) {
-  const item = voiceConsumers.get(producerId);
-  if (!item) return;
-
-  try { item.consumer.close(); } catch (_) {}
-  if (item.audioEl) {
-    item.audioEl.pause();
-    item.audioEl.srcObject = null;
-    item.audioEl.remove();
+function closeVoicePeerConnection(remoteSocketId) {
+  const pc = voicePeerConnections.get(remoteSocketId);
+  if (pc) {
+    try { pc.close(); } catch (_) {}
+    voicePeerConnections.delete(remoteSocketId);
   }
 
-  voiceConsumers.delete(producerId);
-  voiceAudioElements.delete(producerId);
-  voiceProducerOwners.delete(producerId);
+  const audioEl = voiceAudioElements.get(remoteSocketId);
+  if (audioEl) {
+    audioEl.pause();
+    audioEl.srcObject = null;
+    audioEl.remove();
+    voiceAudioElements.delete(remoteSocketId);
+  }
 }
 
 function tryPlayRemoteAudio(audioEl) {
@@ -1369,58 +1381,66 @@ function unlockVoiceAudio() {
   }
 }
 
-async function consumeProducer(producerId) {
-  if (!voiceJoined || !voiceDevice || !voiceRecvTransport || !producerId) return;
-  if (voiceConsumers.has(producerId) || voiceConsumeQueue.has(producerId)) return;
+function createVoicePeerConnection(remoteSocketId) {
+  const pc = new RTCPeerConnection({ iceServers: VOICE_ICE_SERVERS });
 
-  voiceConsumeQueue.add(producerId);
-  try {
-    const consumeData = await voiceRequest("voiceConsume", {
-      transportId: voiceRecvTransport.id,
-      producerId,
-      rtpCapabilities: voiceDevice.rtpCapabilities
-    });
-
-    const consumer = await voiceRecvTransport.consume({
-      id: consumeData.id,
-      producerId: consumeData.producerId,
-      kind: consumeData.kind,
-      rtpParameters: consumeData.rtpParameters
-    });
-
-    const stream = new MediaStream([consumer.track]);
-    const audioEl = document.createElement("audio");
-    audioEl.autoplay = true;
-    audioEl.playsInline = true;
-    audioEl.srcObject = stream;
-    audioEl.muted = !!voiceDeafened;
-    const ownerSocketId = voiceProducerOwners.get(producerId);
-    if (ownerSocketId) {
-      audioEl.volume = getVoiceUserVolume(ownerSocketId) / 100;
+  if (voiceLocalStream) {
+    for (const track of voiceLocalStream.getTracks()) {
+      pc.addTrack(track, voiceLocalStream);
     }
-    audioEl.style.display = "none";
-    document.body.appendChild(audioEl);
-    tryPlayRemoteAudio(audioEl);
-
-    voiceConsumers.set(producerId, { consumer, audioEl });
-    voiceAudioElements.set(producerId, audioEl);
-
-    consumer.on("transportclose", () => cleanupConsumer(producerId));
-    consumer.on("producerclose", () => cleanupConsumer(producerId));
-    consumer.on("trackended", () => cleanupConsumer(producerId));
-
-    await voiceRequest("voiceResumeConsumer", { consumerId: consumer.id });
-  } catch (error) {
-    console.error("consumeProducer error:", error);
-  } finally {
-    voiceConsumeQueue.delete(producerId);
   }
+
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      socket.emit("voiceSignal", {
+        to: remoteSocketId,
+        data: { type: "ice-candidate", candidate: event.candidate }
+      });
+    }
+  };
+
+  pc.ontrack = (event) => {
+    const stream = event.streams[0] || new MediaStream([event.track]);
+    let audioEl = voiceAudioElements.get(remoteSocketId);
+    if (!audioEl) {
+      audioEl = document.createElement("audio");
+      audioEl.autoplay = true;
+      audioEl.playsInline = true;
+      audioEl.style.display = "none";
+      audioEl.muted = !!voiceDeafened;
+      audioEl.volume = getVoiceUserVolume(remoteSocketId) / 100;
+      document.body.appendChild(audioEl);
+      voiceAudioElements.set(remoteSocketId, audioEl);
+    }
+    audioEl.srcObject = stream;
+    tryPlayRemoteAudio(audioEl);
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+      closeVoicePeerConnection(remoteSocketId);
+    }
+  };
+
+  voicePeerConnections.set(remoteSocketId, pc);
+  return pc;
+}
+
+async function initiateVoiceCall(remoteSocketId) {
+  const pc = createVoicePeerConnection(remoteSocketId);
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  socket.emit("voiceSignal", {
+    to: remoteSocketId,
+    data: { type: "offer", sdp: pc.localDescription }
+  });
 }
 
 async function joinVoiceChannel() {
   if (!currentRoom || voiceJoined) return;
-  if (!window.mediasoupClient || !window.mediasoupClient.Device) {
-    addSystemMessage(">>> Voice error: mediasoup-client bundle missing");
+  if (!window.RTCPeerConnection) {
+    console.error("Voice error: WebRTC not supported in this browser");
+    addSystemMessage(`>>> ${GENERIC_ERROR_MESSAGE}`);
     return;
   }
 
@@ -1440,49 +1460,6 @@ async function joinVoiceChannel() {
 
   try {
     const joinData = await voiceRequest("voiceJoin");
-    voiceDevice = new window.mediasoupClient.Device();
-    await voiceDevice.load({ routerRtpCapabilities: joinData.routerRtpCapabilities });
-
-    const sendTransportData = await voiceRequest("voiceCreateTransport", { direction: "send" });
-    voiceSendTransport = voiceDevice.createSendTransport({
-      id: sendTransportData.id,
-      iceParameters: sendTransportData.iceParameters,
-      iceCandidates: sendTransportData.iceCandidates,
-      dtlsParameters: sendTransportData.dtlsParameters
-    });
-
-    voiceSendTransport.on("connect", ({ dtlsParameters }, callback, errback) => {
-      voiceRequest("voiceConnectTransport", {
-        transportId: voiceSendTransport.id,
-        dtlsParameters
-      }).then(() => callback()).catch(errback);
-    });
-
-    voiceSendTransport.on("produce", ({ kind, rtpParameters }, callback, errback) => {
-      voiceRequest("voiceProduce", {
-        transportId: voiceSendTransport.id,
-        kind,
-        rtpParameters
-      }).then((result) => callback({ id: result.id })).catch(errback);
-    });
-
-    const recvTransportData = await voiceRequest("voiceCreateTransport", { direction: "recv" });
-    voiceRecvTransport = voiceDevice.createRecvTransport({
-      id: recvTransportData.id,
-      iceParameters: recvTransportData.iceParameters,
-      iceCandidates: recvTransportData.iceCandidates,
-      dtlsParameters: recvTransportData.dtlsParameters
-    });
-
-    voiceRecvTransport.on("connect", ({ dtlsParameters }, callback, errback) => {
-      voiceRequest("voiceConnectTransport", {
-        transportId: voiceRecvTransport.id,
-        dtlsParameters
-      }).then(() => callback()).catch(errback);
-    });
-
-    const micTrack = voiceLocalStream.getAudioTracks()[0];
-    voiceProducer = await voiceSendTransport.produce({ track: micTrack });
 
     voiceJoined = true;
     voiceMuted = false;
@@ -1494,21 +1471,20 @@ async function joinVoiceChannel() {
     socket.emit("voiceStateUpdate", { muted: false, deafened: false, speaking: false });
     addSystemMessage(">>> Voice connected");
 
-    for (const producerInfo of (joinData.existingProducers || [])) {
-      if (producerInfo?.producerId && producerInfo?.socketId) {
-        voiceProducerOwners.set(producerInfo.producerId, producerInfo.socketId);
-      }
-      await consumeProducer(producerInfo.producerId);
+    for (const remoteSocketId of (joinData.peers || [])) {
+      initiateVoiceCall(remoteSocketId).catch((error) => {
+        console.error("initiateVoiceCall error:", error);
+      });
     }
   } catch (error) {
     console.error("joinVoiceChannel error:", error);
-    addSystemMessage(`>>> Voice error: ${error.message}`);
+    addSystemMessage(`>>> ${GENERIC_ERROR_MESSAGE}`);
     leaveVoiceChannel(true);
   }
 }
 
 function leaveVoiceChannel(notifyServer) {
-  if (!voiceJoined && !voiceLocalStream && !voiceDevice) {
+  if (!voiceJoined && !voiceLocalStream && voicePeerConnections.size === 0) {
     resetVoiceStateUI();
     return;
   }
@@ -1518,36 +1494,21 @@ function leaveVoiceChannel(notifyServer) {
   }
 
   stopVoiceVad();
-  if (voiceProducer) {
-    try { voiceProducer.close(); } catch (_) {}
-    voiceProducer = null;
+
+  for (const remoteSocketId of Array.from(voicePeerConnections.keys())) {
+    closeVoicePeerConnection(remoteSocketId);
   }
-  for (const producerId of Array.from(voiceConsumers.keys())) {
-    cleanupConsumer(producerId);
-  }
-  if (voiceSendTransport) {
-    try { voiceSendTransport.close(); } catch (_) {}
-    voiceSendTransport = null;
-  }
-  if (voiceRecvTransport) {
-    try { voiceRecvTransport.close(); } catch (_) {}
-    voiceRecvTransport = null;
-  }
+
   if (voiceLocalStream) {
     voiceLocalStream.getTracks().forEach((track) => track.stop());
     voiceLocalStream = null;
   }
-  voiceDevice = null;
 
   voiceJoined = false;
   voiceMuted = false;
   voiceDeafened = false;
   voiceSpeaking = false;
   voiceParticipants.clear();
-  voiceConsumeQueue.clear();
-  voiceConsumers.clear();
-  voiceAudioElements.clear();
-  voiceProducerOwners.clear();
 
   renderVoiceParticipants();
   updateVoiceButtons();
@@ -1556,10 +1517,11 @@ function leaveVoiceChannel(notifyServer) {
 async function toggleVoiceMute() {
   if (!voiceJoined) return;
   voiceMuted = !voiceMuted;
-  if (voiceMuted || voiceDeafened) {
-    if (voiceProducer && !voiceProducer.paused) await voiceProducer.pause();
-  } else if (voiceProducer && voiceProducer.paused) {
-    await voiceProducer.resume();
+  if (voiceLocalStream) {
+    const shouldSend = !(voiceMuted || voiceDeafened);
+    voiceLocalStream.getAudioTracks().forEach((track) => {
+      track.enabled = shouldSend;
+    });
   }
   if (voiceMuted) voiceSpeaking = false;
 
@@ -1584,10 +1546,11 @@ async function toggleVoiceDeafen() {
     audioEl.muted = !!voiceDeafened;
   }
 
-  if (voiceDeafened || voiceMuted) {
-    if (voiceProducer && !voiceProducer.paused) await voiceProducer.pause();
-  } else if (voiceProducer && voiceProducer.paused) {
-    await voiceProducer.resume();
+  if (voiceLocalStream) {
+    const shouldSend = !(voiceMuted || voiceDeafened);
+    voiceLocalStream.getAudioTracks().forEach((track) => {
+      track.enabled = shouldSend;
+    });
   }
 
   socket.emit("voiceStateUpdate", {
@@ -1640,30 +1603,38 @@ socket.on("voiceParticipants", ({ participants } = {}) => {
 
 socket.on("voiceUserLeft", ({ socketId } = {}) => {
   if (!socketId) return;
-  for (const [producerId, ownerSocketId] of voiceProducerOwners.entries()) {
-    if (ownerSocketId === socketId) {
-      voiceProducerOwners.delete(producerId);
-    }
-  }
+  closeVoicePeerConnection(socketId);
 });
 
 socket.on("voiceRoomClosed", () => {
   leaveVoiceChannel(false);
 });
 
-socket.on("voiceNewProducer", ({ producerId, socketId } = {}) => {
-  if (!voiceJoined || !producerId) return;
-  if (socketId) {
-    voiceProducerOwners.set(producerId, socketId);
+socket.on("voiceSignal", async ({ from, data } = {}) => {
+  if (!voiceJoined || !from || !data) return;
+  try {
+    if (data.type === "offer") {
+      const pc = voicePeerConnections.get(from) || createVoicePeerConnection(from);
+      await pc.setRemoteDescription(data.sdp);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      socket.emit("voiceSignal", { to: from, data: { type: "answer", sdp: pc.localDescription } });
+    } else if (data.type === "answer") {
+      const pc = voicePeerConnections.get(from);
+      if (pc) await pc.setRemoteDescription(data.sdp);
+    } else if (data.type === "ice-candidate" && data.candidate) {
+      const pc = voicePeerConnections.get(from);
+      if (pc) {
+        try {
+          await pc.addIceCandidate(data.candidate);
+        } catch (error) {
+          console.error("addIceCandidate error:", error);
+        }
+      }
+    }
+  } catch (error) {
+    console.error("voiceSignal handling error:", error);
   }
-  consumeProducer(producerId).catch((error) => {
-    console.error("voiceNewProducer consume error:", error);
-  });
-});
-
-socket.on("voiceProducerClosed", ({ producerId } = {}) => {
-  if (!producerId) return;
-  cleanupConsumer(producerId);
 });
 
 socket.on("disconnect", () => {
@@ -1681,13 +1652,8 @@ function handleEscapeKey(e) {
         document.body.style.cursor = '';
         
         const fileInput = document.getElementById('mediaUploadInput');
-        const genericFileInput = document.getElementById('fileUploadInput');
         if (fileInput && document.activeElement === fileInput) {
             fileInput.value = '';
-            chatInput.focus();
-        }
-        if (genericFileInput && document.activeElement === genericFileInput) {
-            genericFileInput.value = '';
             chatInput.focus();
         }
     }

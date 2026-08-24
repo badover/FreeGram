@@ -639,6 +639,16 @@ body {
   transition: transform 0.2s ease;
 }
 
+.media-video:fullscreen,
+.media-video:-webkit-full-screen {
+  border: none;
+  border-radius: 0;
+  max-width: none;
+  max-height: none;
+  width: 100%;
+  height: 100%;
+}
+
 .media-info {
   flex: 1;
   min-width: 200px;
@@ -704,17 +714,6 @@ body {
 .upload-action-btn:hover {
   background: var(--neon-green);
   transform: scale(1.05);
-}
-
-.upload-action-btn-file {
-  background: rgba(0, 243, 255, 0.14);
-  color: var(--neon-blue);
-  border: 1px solid rgba(0, 243, 255, 0.38);
-}
-
-.upload-action-btn-file:hover {
-  color: black;
-  border-color: transparent;
 }
 
 
@@ -1258,8 +1257,7 @@ body {
 }
 
 @media (max-width: 768px) {
-    #mediaUploadBtn,
-    #fileUploadBtn {
+    #mediaUploadBtn {
         margin-left: 0 !important;
         margin-right: 0 !important;
     }
@@ -1886,7 +1884,7 @@ body {
 
   .input-wrapper {
     display: grid;
-    grid-template-columns: 1fr auto auto;
+    grid-template-columns: 1fr auto;
     gap: 8px;
     margin-bottom: 8px;
   }
@@ -1916,22 +1914,14 @@ body {
     letter-spacing: 1px;
   }
 
-  #mediaUploadBtn,
-  #fileUploadBtn {
+  #mediaUploadBtn {
     margin: 0 !important;
     min-width: 44px;
     width: 44px;
     height: 42px;
     padding: 0 !important;
     font-size: 18px !important;
-  }
-
-  #mediaUploadBtn {
     grid-column: 2;
-  }
-
-  #fileUploadBtn {
-    grid-column: 3;
   }
 
   .status-bar {
