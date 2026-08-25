@@ -26,6 +26,9 @@ const voiceMuteBtn = document.getElementById("voiceMuteBtn");
 const voiceDeafenBtn = document.getElementById("voiceDeafenBtn");
 const voiceStatusLabel = document.getElementById("voiceStatusLabel");
 const voiceUsersList = document.getElementById("voiceUsersList");
+const voicePanel = document.getElementById("voicePanel");
+const voicePanelHeader = document.getElementById("voicePanelHeader");
+const voiceToggleBtn = document.getElementById("voiceToggleBtn");
 const replyPreviewBar = document.getElementById("replyPreviewBar");
 const replyPreviewNickname = document.getElementById("replyPreviewNickname");
 const replyPreviewSnippet = document.getElementById("replyPreviewSnippet");
@@ -39,6 +42,9 @@ let isTyping = false;
 let replyingTo = null;
 const messageRegistry = new Map();
 const MESSAGE_REGISTRY_LIMIT = 300;
+const pendingP2PFiles = new Map();
+const p2pSenderConnections = new Map();
+const p2pReceiverState = new Map();
 let voiceJoined = false;
 let voiceMuted = false;
 let voiceDeafened = false;
@@ -64,15 +70,31 @@ const CHUNK_SIZE = 512 * 1024;
 const THUMBNAIL_SIZE_LIMIT = 8 * 1024 * 1024;
 const MAX_CHAT_LENGTH = 4000;
 const DEFAULT_VOICE_USER_VOLUME = 100;
-const VOICE_ICE_SERVERS = [
+const STUN_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" }
 ];
+let ICE_SERVERS = [...STUN_SERVERS];
+
+function refreshIceServers() {
+  socket.emit("getIceServers", {}, (response) => {
+    console.log("getIceServers response:", JSON.stringify(response));
+    if (!response || !response.ok || !response.turnServer) {
+      console.warn("No TURN server received — ICE_SERVERS stays STUN-only:", JSON.stringify(ICE_SERVERS));
+      return;
+    }
+    ICE_SERVERS = [...STUN_SERVERS, response.turnServer];
+    console.log("ICE_SERVERS updated with TURN:", JSON.stringify(ICE_SERVERS));
+  });
+}
 const VOICE_VAD_INTERVAL_MS = 60;
 const VOICE_VAD_ONSET_FRAMES = 2;
 const VOICE_VAD_HANGOVER_MS = 400;
 const VOICE_VAD_MARGIN = 3.5;
 const VOICE_VAD_NOISE_SMOOTHING = 0.05;
+const P2P_CHUNK_SIZE = 256 * 1024;
+const P2P_BUFFERED_AMOUNT_HIGH = 16 * 1024 * 1024;
+const P2P_BLOB_COALESCE_BYTES = 8 * 1024 * 1024;
 
 function normalizeUploadMime(file) {
   if (file && typeof file.type === "string" && file.type.trim()) {
@@ -136,6 +158,7 @@ function resizeChatInput() {
   if (!chatInput) return;
   chatInput.style.height = "auto";
   chatInput.style.height = `${Math.min(chatInput.scrollHeight, 180)}px`;
+  updateTypingIndicatorPosition();
 }
 
 function normalizeOutgoingMessage(value) {
@@ -304,7 +327,6 @@ function updateTypingIndicatorPosition() {
     if (!indicator) return;
 
     const inputPanel = document.querySelector('.input-panel');
-    const voicePanel = document.querySelector('.voice-panel');
     const bottomOffset = (inputPanel?.offsetHeight || 0) + (voicePanel?.offsetHeight || 0) + 12;
 
     indicator.style.bottom = `${bottomOffset}px`;
@@ -392,6 +414,7 @@ function leaveRoom() {
   
   if (confirm('Are you sure you want to leave this room?')) {
     leaveVoiceChannel(true);
+    cleanupP2PState();
     socket.emit('leaveRoom', { room: currentRoom });
     
     chatScreen.style.display = 'none';
@@ -499,26 +522,28 @@ socket.on("roomError", (msg) => {
 socket.on("roomJoined", (data) => {
   currentRoom = data.room;
   currentNickname = data.nickname;
-  
+
   currentRoomSpan.textContent = safeText(currentRoom).toUpperCase();
   currentUserSpan.textContent = safeText(currentNickname).toUpperCase();
   userCountSpan.textContent = data.userCount || 1;
-  
+
   loginScreen.style.display = "none";
   chatScreen.style.display = "block";
-  
+
   messagesList.innerHTML = "";
   resetVoiceStateUI();
-  
+  refreshIceServers();
+
   addSystemMessage(`>>> ROOM: ${currentRoom}`);
   
-  createMediaUploadButton();
-  
+  createUploadButton();
+
   chatInput.focus();
 });
 
 socket.on("roomClosed", (data) => {
   leaveVoiceChannel(false);
+  cleanupP2PState();
   addSystemMessage(`>>> ROOM CLOSED BY ${data.closedBy}`);
   addSystemMessage(">>> ALL FILES DELETED");
   
@@ -628,7 +653,10 @@ function sendMessage() {
   cancelReply();
 }
 
-function createMediaUploadButton() {
+let pendingUploadMode = "server";
+let uploadChoiceMenu = null;
+
+function createUploadButton() {
   let uploadInput = document.getElementById('mediaUploadInput');
   if (!uploadInput) {
     uploadInput = document.createElement('input');
@@ -649,10 +677,11 @@ function createMediaUploadButton() {
     uploadBtn.type = 'button';
     uploadBtn.className = 'upload-action-btn';
     uploadBtn.innerHTML = '<span aria-hidden="true">📎</span>';
-    uploadBtn.title = 'Upload photo, video or file';
-    uploadBtn.setAttribute('aria-label', 'Upload photo, video or file');
-    uploadBtn.addEventListener('click', () => {
-      uploadInput.click();
+    uploadBtn.title = 'Send a file';
+    uploadBtn.setAttribute('aria-label', 'Send a file');
+    uploadBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      openUploadChoiceMenu(uploadBtn);
     });
     inputWrapper.appendChild(uploadBtn);
   }
@@ -660,13 +689,75 @@ function createMediaUploadButton() {
   if (!uploadInput.dataset.bound) {
     uploadInput.addEventListener('change', () => {
       if (uploadInput.files.length > 0) {
-        uploadMedia(uploadInput.files[0]);
+        const file = uploadInput.files[0];
+        if (pendingUploadMode === "p2p") {
+          offerP2PFile(file);
+        } else {
+          uploadMedia(file);
+        }
         uploadInput.value = '';
       }
     });
     uploadInput.dataset.bound = 'true';
   }
 }
+
+function closeUploadChoiceMenu() {
+  if (!uploadChoiceMenu) return;
+  uploadChoiceMenu.remove();
+  uploadChoiceMenu = null;
+}
+
+function openUploadChoiceMenu(anchorEl) {
+  closeUploadChoiceMenu();
+
+  const menu = document.createElement("div");
+  menu.className = "upload-choice-menu";
+
+  const serverOption = document.createElement("button");
+  serverOption.type = "button";
+  serverOption.className = "upload-choice-option";
+  serverOption.innerHTML = `
+    <span class="upload-choice-icon" aria-hidden="true">📎</span>
+    <span class="upload-choice-text">
+      <strong>Regular upload</strong>
+      <small>Via server, faster, up to 50MB</small>
+    </span>
+  `;
+  serverOption.addEventListener("click", () => {
+    pendingUploadMode = "server";
+    document.getElementById('mediaUploadInput').click();
+    closeUploadChoiceMenu();
+  });
+
+  const p2pOption = document.createElement("button");
+  p2pOption.type = "button";
+  p2pOption.className = "upload-choice-option";
+  p2pOption.innerHTML = `
+    <span class="upload-choice-icon" aria-hidden="true">🔗</span>
+    <span class="upload-choice-text">
+      <strong>P2P direct</strong>
+      <small>Serverless, no size limit, but slower</small>
+    </span>
+  `;
+  p2pOption.addEventListener("click", () => {
+    pendingUploadMode = "p2p";
+    document.getElementById('mediaUploadInput').click();
+    closeUploadChoiceMenu();
+  });
+
+  menu.appendChild(serverOption);
+  menu.appendChild(p2pOption);
+  anchorEl.parentElement.appendChild(menu);
+
+  uploadChoiceMenu = menu;
+}
+
+document.addEventListener("click", (event) => {
+  if (!uploadChoiceMenu) return;
+  if (uploadChoiceMenu.contains(event.target)) return;
+  closeUploadChoiceMenu();
+});
 
 function uint8ToBase64(bytes) {
   const chunkSize = 0x8000;
@@ -757,6 +848,8 @@ socket.on("mediaError", (msg) => {
 socket.on("chatMessage", (data) => {
   if (data.type === 'media') {
     addMediaMessage(data);
+  } else if (data.type === 'p2p-offer') {
+    addP2PMessage(data);
   } else {
     addTextMessage(data);
   }
@@ -800,7 +893,8 @@ function addMediaMessage(data) {
         <img src="${safeMediaURL(data.thumbnail || data.fileUrl)}"
              alt="${escapeHtml(data.fileName)}"
              class="media-thumbnail"
-             data-full-url="${safeMediaURL(data.fileUrl)}">
+             data-full-url="${safeMediaURL(data.fileUrl)}"
+             draggable="false">
         <div class="media-info">
           <strong>📸 ${escapeHtml(data.fileName)}</strong>
           <small>${fileSize}</small>
@@ -851,7 +945,6 @@ function addMediaMessage(data) {
   messagesList.appendChild(messageDiv);
   const zoomableMedia = messageDiv.querySelector(".media-thumbnail");
   if (zoomableMedia) {
-    attachPreviewZoom(zoomableMedia);
     zoomableMedia.addEventListener("click", (event) => {
       event.stopPropagation();
       openFullImage(zoomableMedia.dataset.fullUrl);
@@ -870,6 +963,404 @@ function formatFileSize(bytes) {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
+
+function addP2PMessage(data) {
+  const messageDiv = document.createElement("div");
+  messageDiv.className = data.self ? "message-self media-message" : "message-other media-message";
+  if (data.msgId) messageDiv.dataset.msgId = data.msgId;
+
+  const fileSize = formatFileSize(data.fileSize);
+  const fileId = escapeHtml(String(data.fileId || ""));
+  const isOwnOffer = pendingP2PFiles.has(data.fileId);
+
+  const actionHtml = isOwnOffer
+    ? `<span class="p2p-status">Ready to send, stay online for the download</span>`
+    : `<button type="button" class="p2p-download-btn" data-file-id="${fileId}" data-sender-id="${escapeHtml(String(data.senderSocketId || ""))}">⬇ Download (P2P)</button>`;
+
+  messageDiv.innerHTML = `
+    <div class="message-header">
+      <span class="message-nickname">${escapeHtml(data.nickname)}</span>
+      <span class="message-time">${escapeHtml(data.time)}</span>
+      ${buildReplyButtonHtml(data.msgId)}
+    </div>
+    ${buildReplyQuoteHtml(data.replyTo)}
+    <div class="media-preview media-preview-file">
+      <div class="media-file-icon" aria-hidden="true">🔗</div>
+      <div class="media-info">
+        <strong>🔗 ${escapeHtml(data.fileName)}</strong>
+        <small>${fileSize} • Serverless P2P, no size limit</small>
+        <div class="p2p-progress-row" data-file-id="${fileId}" style="display:none;">
+          <div class="p2p-progress-bar"><div class="p2p-progress-fill"></div></div>
+          <span class="p2p-progress-label">0%</span>
+        </div>
+        ${actionHtml}
+      </div>
+    </div>
+  `;
+
+  messagesList.appendChild(messageDiv);
+  registerMessage(data.msgId, data.nickname, `🔗 ${truncateSnippet(data.fileName, 60)}`, "media", messageDiv);
+  scrollToBottom();
+}
+
+function updateP2PProgress(fileId, receivedBytes, totalBytes) {
+  const row = document.querySelector(`.p2p-progress-row[data-file-id="${CSS.escape(String(fileId))}"]`);
+  if (!row) return;
+  row.style.display = "flex";
+  const pct = totalBytes > 0 ? Math.min(100, Math.round((receivedBytes / totalBytes) * 100)) : 0;
+  const fill = row.querySelector(".p2p-progress-fill");
+  const label = row.querySelector(".p2p-progress-label");
+  if (fill) fill.style.width = `${pct}%`;
+  if (label) label.textContent = `${pct}%`;
+}
+
+function cleanupP2PState() {
+  for (const fileId of Array.from(p2pReceiverState.keys())) {
+    closeP2PReceiverState(fileId);
+  }
+  for (const key of Array.from(p2pSenderConnections.keys())) {
+    closeP2PSenderConnection(key);
+  }
+  pendingP2PFiles.clear();
+}
+
+function offerP2PFile(file) {
+  if (!file || !currentRoom) return;
+
+  const fileId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  pendingP2PFiles.set(fileId, file);
+
+  const replyTo = replyingTo;
+  cancelReply();
+
+  socket.emit("p2pFileOffer", {
+    fileId,
+    fileName: file.name || "file",
+    fileSize: file.size,
+    fileType: file.type || "application/octet-stream",
+    replyTo: replyTo ? { msgId: replyTo.msgId } : null
+  });
+}
+
+function closeP2PReceiverState(fileId) {
+  const state = p2pReceiverState.get(fileId);
+  if (!state) return;
+  clearTimeout(state.connectTimeout);
+  try { state.channel && state.channel.close(); } catch (_) {}
+  try { state.pc.close(); } catch (_) {}
+  p2pReceiverState.delete(fileId);
+}
+
+function cancelP2PDownload(fileId) {
+  const state = p2pReceiverState.get(fileId);
+  const btnEl = state ? state.btnEl : null;
+
+  closeP2PReceiverState(fileId);
+
+  if (btnEl) {
+    btnEl.disabled = false;
+    btnEl.textContent = "⬇ Download (P2P)";
+    btnEl.classList.remove("p2p-cancel-btn");
+  }
+
+  const row = document.querySelector(`.p2p-progress-row[data-file-id="${CSS.escape(String(fileId))}"]`);
+  if (row) {
+    row.style.display = "none";
+    const fill = row.querySelector(".p2p-progress-fill");
+    if (fill) fill.style.width = "0%";
+    const label = row.querySelector(".p2p-progress-label");
+    if (label) label.textContent = "0%";
+  }
+}
+
+function candidateType(candidateStr) {
+  const match = /typ (\w+)/.exec(candidateStr || "");
+  return match ? match[1] : "unknown";
+}
+
+function requestP2PDownload(fileId, senderSocketId, btnEl) {
+  if (!fileId || !senderSocketId) return;
+  if (p2pReceiverState.has(fileId)) return;
+
+  if (btnEl) {
+    btnEl.textContent = "✕ Cancel";
+    btnEl.classList.add("p2p-cancel-btn");
+  }
+
+  console.log("[P2P receiver] creating RTCPeerConnection with ICE_SERVERS:", JSON.stringify(ICE_SERVERS));
+  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  const state = {
+    pc,
+    channel: null,
+    fileId,
+    senderSocketId,
+    chunks: [],
+    pendingCoalesceBytes: 0,
+    receivedBytes: 0,
+    fileSize: 0,
+    fileName: "file",
+    fileType: "application/octet-stream",
+    btnEl,
+    completed: false
+  };
+  p2pReceiverState.set(fileId, state);
+
+  const failDownload = (reason) => {
+    if (state.completed) return;
+    console.error("P2P download failed:", reason, "connectionState:", pc.connectionState, "iceConnectionState:", pc.iceConnectionState);
+    clearTimeout(state.connectTimeout);
+    closeP2PReceiverState(fileId);
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.textContent = "⬇ Download (P2P)";
+      btnEl.classList.remove("p2p-cancel-btn");
+    }
+    addSystemMessage(`>>> ${GENERIC_ERROR_MESSAGE}`);
+  };
+
+  state.connectTimeout = setTimeout(() => {
+    if (!state.completed && pc.connectionState !== "connected") {
+      failDownload("connect timeout after 20s");
+    }
+  }, 20000);
+
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      console.log(`[P2P receiver] local candidate type=${candidateType(event.candidate.candidate)}:`, event.candidate.candidate);
+      socket.emit("p2pSignal", { to: senderSocketId, data: { type: "ice-candidate", fileId, candidate: event.candidate } });
+    } else {
+      console.log("[P2P receiver] ICE gathering complete");
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    console.log(`P2P receiver connectionState: ${pc.connectionState}`);
+    if (pc.connectionState === "connected") {
+      clearTimeout(state.connectTimeout);
+    } else if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+      failDownload(`connectionState=${pc.connectionState}`);
+    }
+  };
+
+  pc.oniceconnectionstatechange = () => {
+    console.log(`P2P receiver iceConnectionState: ${pc.iceConnectionState}`);
+  };
+
+  const channel = pc.createDataChannel(`p2p-${fileId}`, { priority: "high" });
+  channel.binaryType = "arraybuffer";
+  state.channel = channel;
+
+  channel.onopen = () => {
+    console.log("P2P data channel open, sending request for", fileId);
+    channel.send(JSON.stringify({ type: "request", fileId }));
+  };
+
+  channel.onerror = (event) => failDownload(`channel error: ${event.error || event}`);
+
+  channel.onmessage = (event) => {
+    if (typeof event.data === "string") {
+      let msg;
+      try {
+        msg = JSON.parse(event.data);
+      } catch (_) {
+        return;
+      }
+      if (msg.type === "meta") {
+        state.fileSize = msg.fileSize;
+        state.fileName = msg.fileName;
+        state.fileType = msg.fileType;
+        updateP2PProgress(fileId, 0, state.fileSize);
+      } else if (msg.type === "end") {
+        finishP2PDownload(state);
+      }
+      return;
+    }
+    state.chunks.push(event.data);
+    state.receivedBytes += event.data.byteLength;
+    state.pendingCoalesceBytes += event.data.byteLength;
+
+    if (state.pendingCoalesceBytes >= P2P_BLOB_COALESCE_BYTES) {
+      state.chunks = [new Blob(state.chunks)];
+      state.pendingCoalesceBytes = 0;
+    }
+
+    updateP2PProgress(fileId, state.receivedBytes, state.fileSize);
+  };
+
+  (async () => {
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socket.emit("p2pSignal", { to: senderSocketId, data: { type: "offer", fileId, sdp: pc.localDescription } });
+    } catch (error) {
+      console.error("P2P download offer error:", error);
+      failDownload();
+    }
+  })();
+}
+
+function finishP2PDownload(state) {
+  state.completed = true;
+  clearTimeout(state.connectTimeout);
+  const blob = new Blob(state.chunks, { type: state.fileType || "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = state.fileName || "file";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+
+  if (state.btnEl) {
+    state.btnEl.textContent = "✓ Downloaded";
+    state.btnEl.classList.remove("p2p-cancel-btn");
+    state.btnEl.disabled = true;
+  }
+  updateP2PProgress(state.fileId, state.fileSize, state.fileSize);
+
+  try { state.channel.close(); } catch (_) {}
+  try { state.pc.close(); } catch (_) {}
+  p2pReceiverState.delete(state.fileId);
+}
+
+async function sendFileOverP2PChannel(channel, file) {
+  channel.send(JSON.stringify({ type: "meta", fileName: file.name, fileSize: file.size, fileType: file.type || "application/octet-stream" }));
+  channel.bufferedAmountLowThreshold = Math.floor(P2P_BUFFERED_AMOUNT_HIGH / 2);
+
+  const chunkSize = channel.maxMessageSize
+    ? Math.min(P2P_CHUNK_SIZE, channel.maxMessageSize)
+    : P2P_CHUNK_SIZE;
+
+  let offset = 0;
+  while (offset < file.size) {
+    if (channel.readyState !== "open") return;
+
+    if (channel.bufferedAmount > P2P_BUFFERED_AMOUNT_HIGH) {
+      await new Promise((resolve) => {
+        channel.onbufferedamountlow = () => resolve();
+      });
+      if (channel.readyState !== "open") return;
+    }
+
+    const slice = file.slice(offset, offset + chunkSize);
+    const buffer = await slice.arrayBuffer();
+    if (channel.readyState !== "open") return;
+    channel.send(buffer);
+    offset += buffer.byteLength;
+  }
+
+  if (channel.readyState === "open") {
+    channel.send(JSON.stringify({ type: "end" }));
+  }
+}
+
+function senderKey(remoteSocketId, fileId) {
+  return `${remoteSocketId}:${fileId}`;
+}
+
+function closeP2PSenderConnection(key) {
+  const entry = p2pSenderConnections.get(key);
+  if (!entry) return;
+  try { entry.channel && entry.channel.close(); } catch (_) {}
+  try { entry.pc.close(); } catch (_) {}
+  p2pSenderConnections.delete(key);
+}
+
+async function handleP2POffer(fromSocketId, data) {
+  const file = pendingP2PFiles.get(data.fileId);
+  if (!file) {
+    console.error(
+      "P2P offer received for a fileId we no longer have (tab reloaded, or socket reconnected and cleared pendingP2PFiles):",
+      data.fileId
+    );
+    return;
+  }
+
+  const key = senderKey(fromSocketId, data.fileId);
+  closeP2PSenderConnection(key);
+
+  console.log("[P2P sender] creating RTCPeerConnection with ICE_SERVERS:", JSON.stringify(ICE_SERVERS));
+  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  p2pSenderConnections.set(key, { pc, channel: null, fileId: data.fileId });
+
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      console.log(`[P2P sender] local candidate type=${candidateType(event.candidate.candidate)}:`, event.candidate.candidate);
+      socket.emit("p2pSignal", { to: fromSocketId, data: { type: "ice-candidate", fileId: data.fileId, candidate: event.candidate } });
+    } else {
+      console.log("[P2P sender] ICE gathering complete");
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    console.log(`P2P sender connectionState (${key}): ${pc.connectionState}`);
+    if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+      closeP2PSenderConnection(key);
+    }
+  };
+
+  pc.oniceconnectionstatechange = () => {
+    console.log(`P2P sender iceConnectionState (${key}): ${pc.iceConnectionState}`);
+  };
+
+  pc.ondatachannel = (event) => {
+    const channel = event.channel;
+    channel.binaryType = "arraybuffer";
+    const entry = p2pSenderConnections.get(key);
+    if (entry) entry.channel = channel;
+
+    channel.onmessage = (msgEvent) => {
+      if (typeof msgEvent.data !== "string") return;
+      let msg;
+      try {
+        msg = JSON.parse(msgEvent.data);
+      } catch (_) {
+        return;
+      }
+      if (msg.type === "request" && msg.fileId === data.fileId) {
+        sendFileOverP2PChannel(channel, file).catch((error) => {
+          console.error("P2P send error:", error);
+        });
+      }
+    };
+
+    channel.onclose = () => {
+      closeP2PSenderConnection(key);
+    };
+  };
+
+  await pc.setRemoteDescription(data.sdp);
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  socket.emit("p2pSignal", { to: fromSocketId, data: { type: "answer", fileId: data.fileId, sdp: pc.localDescription } });
+}
+
+socket.on("p2pSignal", async ({ from, data } = {}) => {
+  if (!from || !data || !data.fileId) return;
+  try {
+    if (data.type === "offer") {
+      await handleP2POffer(from, data);
+    } else if (data.type === "answer") {
+      const state = p2pReceiverState.get(data.fileId);
+      if (state) await state.pc.setRemoteDescription(data.sdp);
+    } else if (data.type === "ice-candidate" && data.candidate) {
+      const senderEntry = p2pSenderConnections.get(senderKey(from, data.fileId));
+      const receiverState = p2pReceiverState.get(data.fileId);
+      const pc = (senderEntry ? senderEntry.pc : null) || (receiverState ? receiverState.pc : null);
+      if (pc) {
+        console.log(`[P2P] remote candidate type=${candidateType(data.candidate.candidate)}:`, data.candidate.candidate);
+        try {
+          await pc.addIceCandidate(data.candidate);
+        } catch (error) {
+          console.error("P2P addIceCandidate error:", error);
+        }
+      }
+    }
+  } catch (error) {
+    console.error("p2pSignal handling error:", error);
+  }
+});
 
 function clampZoomLevel(value, min = 1, max = 4) {
   return Math.min(max, Math.max(min, value));
@@ -893,27 +1384,6 @@ function applyPreviewZoom(mediaEl, zoom) {
   const normalizedZoom = clampZoomLevel(zoom);
   mediaEl.dataset.zoom = String(normalizedZoom);
   mediaEl.style.transform = `scale(${normalizedZoom})`;
-}
-
-function attachPreviewZoom(mediaEl) {
-  if (!mediaEl || mediaEl.dataset.zoomBound === "true") return;
-
-  applyPreviewZoom(mediaEl, Number(mediaEl.dataset.zoom || 1));
-
-  mediaEl.addEventListener("wheel", (event) => {
-    event.preventDefault();
-    setZoomOriginFromPointer(mediaEl, event.clientX, event.clientY);
-    const currentZoom = Number(mediaEl.dataset.zoom || 1);
-    const delta = event.deltaY < 0 ? 0.12 : -0.12;
-    applyPreviewZoom(mediaEl, currentZoom + delta);
-  }, { passive: false });
-
-  mediaEl.addEventListener("dblclick", (event) => {
-    event.preventDefault();
-    applyPreviewZoom(mediaEl, 1);
-  });
-
-  mediaEl.dataset.zoomBound = "true";
 }
 
 function handleVideoFullscreenChange() {
@@ -1247,6 +1717,7 @@ function openVoiceContextMenu(participant, clientX, clientY) {
 }
 
 function updateVoiceButtons() {
+  if (voicePanel && voiceJoined) voicePanel.classList.remove("collapsed");
   if (voiceJoinBtn) voiceJoinBtn.disabled = voiceJoined;
   if (voiceLeaveBtn) voiceLeaveBtn.disabled = !voiceJoined;
   if (voiceMuteBtn) {
@@ -1274,6 +1745,7 @@ function updateVoiceButtons() {
       voiceStatusLabel.textContent = "VOICE: LIVE";
     }
   }
+  updateTypingIndicatorPosition();
 }
 
 function renderVoiceParticipants() {
@@ -1449,7 +1921,7 @@ function unlockVoiceAudio() {
 }
 
 function createVoicePeerConnection(remoteSocketId) {
-  const pc = new RTCPeerConnection({ iceServers: VOICE_ICE_SERVERS });
+  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
 
   if (voiceLocalStream) {
     for (const track of voiceLocalStream.getTracks()) {
@@ -1628,6 +2100,14 @@ async function toggleVoiceDeafen() {
   updateVoiceButtons();
 }
 
+if (voicePanelHeader) {
+  voicePanelHeader.addEventListener("click", (event) => {
+    if (event.target.closest(".voice-controls")) return;
+    voicePanel.classList.toggle("collapsed");
+    updateTypingIndicatorPosition();
+  });
+}
+
 if (voiceJoinBtn) {
   voiceJoinBtn.addEventListener("click", () => {
     joinVoiceChannel().catch((error) => {
@@ -1706,6 +2186,7 @@ socket.on("voiceSignal", async ({ from, data } = {}) => {
 
 socket.on("disconnect", () => {
   leaveVoiceChannel(false);
+  cleanupP2PState();
 });
 
 document.addEventListener('keydown', handleEscapeKey);
@@ -1713,6 +2194,7 @@ document.addEventListener('keydown', handleEscapeKey);
 function handleEscapeKey(e) {
     if (e.key === 'Escape') {
         closeVoiceContextMenu();
+        closeUploadChoiceMenu();
         closeFullImageModal();
         hideSafetyModal();
         hideDragIndicator();
@@ -1746,6 +2228,7 @@ window.openFullImage = function(url) {
     
     const img = document.createElement('img');
     img.src = url;
+    img.draggable = false;
     img.style.cssText = `
         max-width: 90%;
         max-height: 90%;
@@ -1873,6 +2356,17 @@ messagesList.addEventListener("click", (e) => {
   const replyQuote = e.target.closest(".message-reply-quote");
   if (replyQuote) {
     scrollToMessage(replyQuote.dataset.replyTarget);
+    return;
+  }
+
+  const p2pDownloadBtn = e.target.closest(".p2p-download-btn");
+  if (p2pDownloadBtn) {
+    const fileId = p2pDownloadBtn.dataset.fileId;
+    if (p2pReceiverState.has(fileId)) {
+      cancelP2PDownload(fileId);
+    } else {
+      requestP2PDownload(fileId, p2pDownloadBtn.dataset.senderId, p2pDownloadBtn);
+    }
     return;
   }
 

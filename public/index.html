@@ -110,9 +110,10 @@
         <div id="messages" class="messages"></div>
       </div>
 
-      <div class="voice-panel">
-        <div class="voice-panel-header">
+      <div class="voice-panel collapsed" id="voicePanel">
+        <div class="voice-panel-header" id="voicePanelHeader">
           <span id="voiceStatusLabel">VOICE: OFF</span>
+          <button type="button" id="voiceToggleBtn" class="voice-toggle-btn" aria-label="Toggle voice panel">&#9662;</button>
           <div class="voice-controls">
             <button id="voiceJoinBtn" class="voice-btn"><i class="fas fa-phone-volume"></i> JOIN</button>
             <button id="voiceLeaveBtn" class="voice-btn" disabled><i class="fas fa-phone-slash"></i> LEAVE</button>

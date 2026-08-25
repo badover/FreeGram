@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -53,6 +55,18 @@ const MAX_FILE_UPLOADS = 5;
 const MAX_FILE_UPLOADS_PERIOD = 30 * 1000;
 
 const SERVER_HOST = process.env.HOST || "127.0.0.1";
+const TURN_URL = process.env.TURN_URL || "";
+const TURN_SECRET = process.env.TURN_SECRET || "";
+const TURN_CREDENTIAL_TTL = 6 * 60 * 60;
+
+function getTurnServer() {
+  if (!TURN_URL || !TURN_SECRET) return null;
+
+  const username = `${Math.floor(Date.now() / 1000) + TURN_CREDENTIAL_TTL}`;
+  const credential = crypto.createHmac("sha1", TURN_SECRET).update(username).digest("base64");
+
+  return { urls: TURN_URL, username, credential, credentialType: "password" };
+}
 
 const UPLOADS_DIR = path.join(__dirname, 'public', 'uploads');
 if (!fs.existsSync(UPLOADS_DIR)) {
@@ -472,6 +486,12 @@ io.on("connection", (socket) => {
 
   socket.lastMsg = 0;
 
+  socket.on("getIceServers", (_, callback) => {
+    if (typeof callback !== "function") return;
+    const turnServer = getTurnServer();
+    callback({ ok: true, turnServer });
+  });
+
   socket.on("createRoom", ({ room, password, nickname }) => {
     room = sanitizeString(room, MAX_ROOM_LEN);
     nickname = sanitizeString(nickname || "Anonymous", MAX_NICK_LEN);
@@ -699,6 +719,61 @@ io.on("connection", (socket) => {
     if (typeof payload.speaking === "boolean") state.speaking = payload.speaking;
 
     emitVoiceParticipants(socket.room);
+  });
+
+  socket.on("p2pFileOffer", (payload = {}) => {
+    const roomData = rooms[socket.room];
+    if (!roomData) return;
+    if (!payload || typeof payload !== "object") return;
+
+    if (!fileUploadLimiter.isAllowed(socket.id)) {
+      const remainingWait = fileUploadLimiter.getRemainingTime(socket.id);
+      socket.emit("mediaError", `Upload limit reached. Try again in ${remainingWait}s`);
+      return;
+    }
+
+    const fileId = typeof payload.fileId === "string" ? payload.fileId.trim().slice(0, 64) : "";
+    const fileSize = typeof payload.fileSize === "number" && payload.fileSize > 0 ? payload.fileSize : 0;
+    if (!fileId || !/^[a-zA-Z0-9._-]{1,64}$/.test(fileId) || !fileSize) return;
+
+    const fileName = sanitizeUploadName(typeof payload.fileName === "string" ? payload.fileName : "file").substring(0, 100);
+    const fileType = typeof payload.fileType === "string" ? payload.fileType.slice(0, 120) : "application/octet-stream";
+
+    const replyTo = resolveReplyTo(roomData, payload.replyTo);
+    const msgId = generateMessageId();
+
+    const offerMsg = {
+      type: "p2p-offer",
+      msgId,
+      fileId,
+      fileName,
+      fileSize,
+      fileType,
+      senderSocketId: socket.id,
+      nickname: socket.nickname,
+      time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      self: false,
+      replyTo
+    };
+
+    cacheMessageForReply(roomData, msgId, socket.nickname, `🔗 ${fileName}`, "media");
+
+    socket.to(socket.room).emit("chatMessage", offerMsg);
+    socket.emit("chatMessage", { ...offerMsg, self: true });
+  });
+
+  socket.on("p2pSignal", ({ to, data } = {}) => {
+    if (!socket.room || !rooms[socket.room]) return;
+    if (typeof to !== "string" || !to || !data || typeof data !== "object") return;
+
+    const roomData = rooms[socket.room];
+    if (!roomData.users[to] || !roomData.users[socket.id]) return;
+
+    io.to(to).emit("p2pSignal", {
+      from: socket.id,
+      nickname: socket.nickname || "Anonymous",
+      data
+    });
   });
 
 
