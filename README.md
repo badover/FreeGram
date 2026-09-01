@@ -1,6 +1,6 @@
 ## FreeGram - https://fgram.net
-<img width="1024" height="1024" alt="fgramnet" src="https://github.com/user-attachments/assets/b547ea9c-afe6-46f3-b145-f359c450c7df" />
 
+<img width="1024" height="1024" alt="fgramnet" src="https://github.com/user-attachments/assets/b547ea9c-afe6-46f3-b145-f359c450c7df" />
 
 **FreeGram** is an open-source web messenger designed for anonymous communication without registration, tracking, or personal data collection.
 
@@ -12,10 +12,14 @@
   <a href="https://discord.gg/TbKtP8F9cn">
     <img src="https://img.shields.io/badge/Join%20our%20Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join our Discord" />
   </a>
+  &nbsp;
+  <a href="bitcoin:bc1qewj7zwanksdk9246arhmjh4cyh734q082ykvlx">
+    <img src="https://img.shields.io/badge/Donate%20with%20Bitcoin-F7931A?style=for-the-badge&logo=bitcoin&logoColor=white" alt="Donate with Bitcoin" />
+  </a>
+
 </p>
 
-
-The server does not log any information about users or their activity.  
+The server does not log any information about users or their activity.
 FreeGram does not use any database, which means message history is never stored.
 
 ---
@@ -24,7 +28,7 @@ FreeGram does not use any database, which means message history is never stored.
 
 FreeGram allows users to create temporary chat rooms using any login and password of their choice.
 
-Room credentials can be securely shared with friends.  
+Room credentials can be securely shared with friends.
 Each room is an isolated and private space where participants can exchange messages in real time.
 **In rooms you can send messages, videos, photos, talk with your friends in audio-calls and all this without any logs.**
 
@@ -34,12 +38,12 @@ Rooms are ephemeral and exist only while they are actively used.
 
 ## Security
 
-- Protection against XSS attacks  
-- Room passwords are stored locally on the server in encrypted form  
-- No SQL or other database usage, eliminating SQL injection risks  
-- Rooms are automatically deleted after 5 minutes of inactivity  
-- Messages are not logged or persisted  
-- Messages cannot be correlated with real users  
+* Protection against XSS attacks
+* Room passwords are stored locally on the server in encrypted form
+* No SQL or other database usage, eliminating SQL injection risks
+* Rooms are automatically deleted after 5 minutes of inactivity
+* Messages are not logged or persisted
+* Messages cannot be correlated with real users
 
 ---
 
@@ -54,15 +58,16 @@ Our team believe that every person has right for privacy. Many messengers nowada
 Contributions are welcome.
 
 You can help by:
-- Doing pull requests 
-- Reporting issues  
-- Suggesting improvements  
+
+* Doing pull requests
+* Reporting issues
+* Suggesting improvements
 
 ---
 
 ## Disclaimer
 
-This project is provided "**as is**", without any warranties.  
+This project is provided "**as is**", without any warranties.
 The authors are not responsible for misuse of the software.
 
 ---
