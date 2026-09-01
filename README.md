@@ -19,6 +19,11 @@
 
 </p>
 
+<p align="center">
+  <strong>Bitcoin:</strong>
+  <code>bc1qewj7zwanksdk9246arhmjh4cyh734q082ykvlx</code>
+</p>
+
 The server does not log any information about users or their activity.
 FreeGram does not use any database, which means message history is never stored.
 
