@@ -14,13 +14,13 @@
   </a>
   &nbsp;
   <a href="bitcoin:bc1qewj7zwanksdk9246arhmjh4cyh734q082ykvlx">
-    <img src="https://img.shields.io/badge/Donate%20with%20Bitcoin-F7931A?style=for-the-badge&logo=bitcoin&logoColor=white" alt="Donate with Bitcoin" />
+    <img src="https://img.shields.io/badge/Donate%20with%20Bitcoin-F7931A?style=for-the-badge&logo=bitcoin&logoColor=white" alt="Support us with Bitcoin" />
   </a>
 
 </p>
 
 <p align="center">
-  <strong>Bitcoin:</strong>
+  <strong>Bitcoin adress for donations:</strong>
   <code>bc1qewj7zwanksdk9246arhmjh4cyh734q082ykvlx</code>
 </p>
 
