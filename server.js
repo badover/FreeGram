@@ -49,10 +49,12 @@ const MAX_IMAGE_DIMENSION = 1600;
 
 const MAX_CONNECTIONS = 10000;
 const MAX_USERS_PER_ROOM = 500;
-const MAX_ROOM_CREATIONS = 20; 
+const MAX_ROOM_CREATIONS = 20;
 const MAX_ROOM_CREATIONS_PERIOD = 10 * 60 * 1000;
 const MAX_FILE_UPLOADS = 5;
 const MAX_FILE_UPLOADS_PERIOD = 30 * 1000;
+const MAX_JOIN_ATTEMPTS = 20;
+const MAX_JOIN_ATTEMPTS_PERIOD = 60 * 1000;
 
 const SERVER_HOST = process.env.HOST || "127.0.0.1";
 const TURN_URL = process.env.TURN_URL || "";
@@ -131,11 +133,12 @@ class RateLimiter {
 
 const roomCreationLimiter = new RateLimiter(MAX_ROOM_CREATIONS, MAX_ROOM_CREATIONS_PERIOD);
 const fileUploadLimiter = new RateLimiter(MAX_FILE_UPLOADS, MAX_FILE_UPLOADS_PERIOD);
+const joinAttemptLimiter = new RateLimiter(MAX_JOIN_ATTEMPTS, MAX_JOIN_ATTEMPTS_PERIOD);
 
 let activeConnections = 0;
 
-const rooms = {};
-const roomFiles = {}; 
+const rooms = Object.create(null);
+const roomFiles = Object.create(null);
 const uploadedFiles = Object.create(null);
 const pendingUploads = Object.create(null);
 
@@ -237,6 +240,15 @@ function hashPassword(password) {
   return crypto.createHash("sha256").update(password).digest("hex");
 }
 
+const DUMMY_PASSWORD_HASH = hashPassword(crypto.randomBytes(32).toString("hex"));
+
+function safeEqual(a, b) {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
 function generateMessageId() {
   return crypto.randomBytes(9).toString("base64url");
 }
@@ -316,15 +328,21 @@ function decodeChunkData(chunkData) {
 
 async function optimizeUploadBuffer(buffer, fileType) {
   let finalBuffer = buffer;
-  let finalType = typeof fileType === "string" && fileType.trim()
-    ? fileType.trim()
-    : "application/octet-stream";
+  const requestedType = typeof fileType === "string" ? fileType.trim().toLowerCase() : "";
+  let finalType = ALLOWED_TYPES[requestedType] ? requestedType : "application/octet-stream";
   let metadataStripped = false;
 
   const isImage = finalType.startsWith("image/");
   const isAnimatedGif = finalType === "image/gif";
 
-  if (isImage && !isAnimatedGif) {
+  if (isAnimatedGif) {
+    try {
+      await sharp(finalBuffer, { animated: true }).metadata();
+    } catch (validateError) {
+      console.error("GIF validation failed, rejecting as image:", validateError.message);
+      finalType = "application/octet-stream";
+    }
+  } else if (isImage) {
     try {
       let pipeline = sharp(finalBuffer).rotate();
       if (finalBuffer.length > MAX_IMAGE_BYTES) {
@@ -348,7 +366,9 @@ async function optimizeUploadBuffer(buffer, fileType) {
       }
       metadataStripped = true;
     } catch (optimizeError) {
-      console.error("Image optimize failed, keeping original:", optimizeError.message);
+      console.error("Image optimize failed, rejecting as image:", optimizeError.message);
+      finalBuffer = buffer;
+      finalType = "application/octet-stream";
     }
   } else if (isInlineUpload(finalType)) {
     metadataStripped = true;
@@ -552,14 +572,19 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const roomData = rooms[room];
-    if (!roomData) {
-      socket.emit("roomError", "Room doesn't exist");
+    if (!joinAttemptLimiter.isAllowed(socket.id)) {
+      const remainingWait = joinAttemptLimiter.getRemainingTime(socket.id);
+      socket.emit("roomError", `Too many attempts. Try again in ${remainingWait}s`);
+      console.warn(`⚠️ Join rate limit: ${socket.nickname || 'Anonymous'} blocked for ${remainingWait}s`);
       return;
     }
 
-    if (roomData.password !== hashPassword(password)) {
-      socket.emit("roomError", "Incorrect password");
+    const roomData = rooms[room];
+    const expectedHash = roomData ? roomData.password : DUMMY_PASSWORD_HASH;
+    const passwordOk = safeEqual(hashPassword(password), expectedHash);
+
+    if (!roomData || !passwordOk) {
+      socket.emit("roomError", "Invalid room or password");
       return;
     }
 
@@ -1065,28 +1090,12 @@ io.on("connection", (socket) => {
     });
   });
 
-  socket.onAny((eventName, data) => {
-    if (eventName === "chatMessage" && 
-        typeof data === "object" && 
-        data.type === "media") {
-        console.error('BLOCKED: Fake media message from', socket.nickname);
-        return;
-    }
-
-    if (eventName === "chatMessage" && 
-        typeof data === "string" && 
-        data.length > MAX_MSG_LEN * 2) {
-        console.error('BLOCKED: Too long message from', socket.nickname);
-        return;
-    }
-});
-
-
   socket.on("disconnect", () => {
     activeConnections--;
     
     roomCreationLimiter.attempts.delete(socket.id);
     fileUploadLimiter.attempts.delete(socket.id);
+    joinAttemptLimiter.attempts.delete(socket.id);
     Object.keys(pendingUploads)
       .filter((key) => key.startsWith(`${socket.id}:`))
       .forEach((key) => cleanupPendingUpload(key));

@@ -119,8 +119,11 @@
             <button id="voiceLeaveBtn" class="voice-btn" disabled><i class="fas fa-phone-slash"></i> LEAVE</button>
             <button id="voiceMuteBtn" class="voice-btn" disabled><i class="fas fa-microphone"></i> MUTE</button>
             <button id="voiceDeafenBtn" class="voice-btn" disabled><i class="fas fa-headphones"></i> DEAFEN</button>
+            <button id="voiceCamBtn" class="voice-btn" disabled><i class="fas fa-video"></i> CAM</button>
+            <button id="voiceScreenBtn" class="voice-btn" disabled><i class="fas fa-desktop"></i> SHARE</button>
           </div>
         </div>
+        <div id="voiceVideoGrid" class="voice-video-grid"></div>
         <div id="voiceUsersList" class="voice-users-list"></div>
       </div>
       
@@ -148,6 +151,15 @@
     </div>
     
     <div class="cyber-grid"></div>
+  </div>
+
+  <div id="voiceTheater" class="voice-theater" hidden>
+    <button type="button" id="voiceTheaterClose" class="voice-theater-close" aria-label="Close">&times;</button>
+    <div id="voiceTheaterStream" class="voice-theater-stream">
+      <div id="voiceTheaterStreamMain" class="voice-theater-stream-main"></div>
+      <div id="voiceTheaterStreamStrip" class="voice-theater-stream-strip"></div>
+    </div>
+    <div id="voiceTheaterGrid" class="voice-theater-grid"></div>
   </div>
 
   <div id="safetyModal" class="safety-modal">

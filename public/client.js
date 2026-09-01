@@ -24,8 +24,16 @@ const voiceJoinBtn = document.getElementById("voiceJoinBtn");
 const voiceLeaveBtn = document.getElementById("voiceLeaveBtn");
 const voiceMuteBtn = document.getElementById("voiceMuteBtn");
 const voiceDeafenBtn = document.getElementById("voiceDeafenBtn");
+const voiceCamBtn = document.getElementById("voiceCamBtn");
+const voiceScreenBtn = document.getElementById("voiceScreenBtn");
 const voiceStatusLabel = document.getElementById("voiceStatusLabel");
 const voiceUsersList = document.getElementById("voiceUsersList");
+const voiceVideoGrid = document.getElementById("voiceVideoGrid");
+const voiceTheater = document.getElementById("voiceTheater");
+const voiceTheaterStreamMain = document.getElementById("voiceTheaterStreamMain");
+const voiceTheaterStreamStrip = document.getElementById("voiceTheaterStreamStrip");
+const voiceTheaterGrid = document.getElementById("voiceTheaterGrid");
+const voiceTheaterClose = document.getElementById("voiceTheaterClose");
 const voicePanel = document.getElementById("voicePanel");
 const voicePanelHeader = document.getElementById("voicePanelHeader");
 const voiceToggleBtn = document.getElementById("voiceToggleBtn");
@@ -33,6 +41,11 @@ const replyPreviewBar = document.getElementById("replyPreviewBar");
 const replyPreviewNickname = document.getElementById("replyPreviewNickname");
 const replyPreviewSnippet = document.getElementById("replyPreviewSnippet");
 const replyPreviewCancel = document.getElementById("replyPreviewCancel");
+
+const screenShareSupported = !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
+if (voiceScreenBtn && !screenShareSupported) {
+  voiceScreenBtn.style.display = "none";
+}
 
 let currentRoom = "";
 let currentNickname = "";
@@ -49,8 +62,15 @@ let voiceJoined = false;
 let voiceMuted = false;
 let voiceDeafened = false;
 let voiceLocalStream = null;
+let voiceCamStream = null;
+let voiceScreenStream = null;
 let voicePeerConnections = new Map();
 let voiceAudioElements = new Map();
+const voiceCamSenders = new Map();
+const voiceScreenSenders = new Map();
+const voiceVideoTiles = new Map();
+const voiceRemoteVideoMeta = new Map();
+const voicePendingRemoteStreams = new Map();
 let voiceUserVolumes = new Map();
 let voiceVadContext = null;
 let voiceVadAnalyser = null;
@@ -1734,6 +1754,20 @@ function updateVoiceButtons() {
       ? '<i class="fas fa-volume-up"></i> UNDEAFEN'
       : '<i class="fas fa-headphones"></i> DEAFEN';
   }
+  if (voiceCamBtn) {
+    voiceCamBtn.disabled = !voiceJoined;
+    voiceCamBtn.classList.toggle("active", !!voiceCamStream);
+    voiceCamBtn.innerHTML = voiceCamStream
+      ? '<i class="fas fa-video-slash"></i> STOP CAM'
+      : '<i class="fas fa-video"></i> CAM';
+  }
+  if (voiceScreenBtn) {
+    voiceScreenBtn.disabled = !voiceJoined;
+    voiceScreenBtn.classList.toggle("active", !!voiceScreenStream);
+    voiceScreenBtn.innerHTML = voiceScreenStream
+      ? '<i class="fas fa-stop"></i> STOP SHARE'
+      : '<i class="fas fa-desktop"></i> SHARE';
+  }
   if (voiceStatusLabel) {
     if (!voiceJoined) {
       voiceStatusLabel.textContent = "VOICE: OFF";
@@ -1892,6 +1926,17 @@ function closeVoicePeerConnection(remoteSocketId) {
     audioEl.remove();
     voiceAudioElements.delete(remoteSocketId);
   }
+
+  voiceCamSenders.delete(remoteSocketId);
+  voiceScreenSenders.delete(remoteSocketId);
+  hideRemoteVideoTile(remoteSocketId, "cam");
+  hideRemoteVideoTile(remoteSocketId, "screen");
+  for (const [streamId, meta] of Array.from(voiceRemoteVideoMeta.entries())) {
+    if (meta.from === remoteSocketId) voiceRemoteVideoMeta.delete(streamId);
+  }
+  for (const key of Array.from(voicePendingRemoteStreams.keys())) {
+    if (key.startsWith(`${remoteSocketId}:`)) voicePendingRemoteStreams.delete(key);
+  }
 }
 
 function tryPlayRemoteAudio(audioEl) {
@@ -1920,14 +1965,223 @@ function unlockVoiceAudio() {
   }
 }
 
-function createVoicePeerConnection(remoteSocketId) {
-  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+let theaterOpen = false;
+let theaterMode = null;
 
+function ensureVideoGridVisible() {
+  if (!voiceVideoGrid) return;
+  voiceVideoGrid.style.display = voiceVideoGrid.children.length > 0 ? "grid" : "none";
+}
+
+function enterVideoFullscreen(el) {
+  if (!el || typeof el.requestFullscreen !== "function") return;
+  el.requestFullscreen().catch(() => {});
+}
+
+function exitVideoFullscreen() {
+  if (document.fullscreenElement) {
+    document.exitFullscreen().catch(() => {});
+  }
+}
+
+const isTouchDevice = window.matchMedia("(pointer: coarse)").matches;
+
+function handleVoiceOrientationChange() {
+  if (!isTouchDevice || !theaterOpen) return;
+  const isLandscape = window.matchMedia("(orientation: landscape)").matches;
+  if (isLandscape) {
+    enterVideoFullscreen(voiceTheater);
+  } else {
+    exitVideoFullscreen();
+  }
+}
+
+if (window.screen && window.screen.orientation) {
+  window.screen.orientation.addEventListener("change", handleVoiceOrientationChange);
+} else {
+  window.addEventListener("orientationchange", handleVoiceOrientationChange);
+}
+
+function getVideoTilesByKind(kind) {
+  const result = [];
+  for (const tile of voiceVideoTiles.values()) {
+    if (tile.el.dataset.kind === kind) result.push(tile);
+  }
+  return result;
+}
+
+function relayoutVideoTiles() {
+  if (!voiceTheater) return;
+
+  if (!theaterOpen) {
+    for (const tile of voiceVideoTiles.values()) {
+      if (tile.el.parentElement !== voiceVideoGrid) voiceVideoGrid.appendChild(tile.el);
+    }
+    ensureVideoGridVisible();
+    return;
+  }
+
+  const screenTiles = getVideoTilesByKind("screen");
+  const camTiles = getVideoTilesByKind("cam");
+
+  if (theaterMode === "stream" && screenTiles.length === 0) {
+    theaterMode = camTiles.length > 0 ? "cameras" : null;
+  } else if (theaterMode === "cameras" && camTiles.length === 0) {
+    theaterMode = screenTiles.length > 0 ? "stream" : null;
+  }
+
+  if (!theaterMode) {
+    closeVideoTheater();
+    return;
+  }
+
+  voiceTheater.dataset.mode = theaterMode;
+
+  if (theaterMode === "stream") {
+    for (const tile of screenTiles) {
+      if (tile.el.parentElement !== voiceTheaterStreamMain) voiceTheaterStreamMain.appendChild(tile.el);
+    }
+    for (const tile of camTiles) {
+      if (tile.el.parentElement !== voiceTheaterStreamStrip) voiceTheaterStreamStrip.appendChild(tile.el);
+    }
+  } else {
+    for (const tile of camTiles) {
+      if (tile.el.parentElement !== voiceTheaterGrid) voiceTheaterGrid.appendChild(tile.el);
+    }
+  }
+}
+
+function openVideoTheater(mode) {
+  if (!voiceTheater) return;
+  theaterOpen = true;
+  theaterMode = mode;
+  voiceTheater.hidden = false;
+  relayoutVideoTiles();
+  handleVoiceOrientationChange();
+}
+
+function closeVideoTheater() {
+  if (!voiceTheater) return;
+  theaterOpen = false;
+  theaterMode = null;
+  voiceTheater.hidden = true;
+  exitVideoFullscreen();
+  relayoutVideoTiles();
+}
+
+function handleVideoTileClick(kind) {
+  if (!theaterOpen) {
+    openVideoTheater(kind === "screen" ? "stream" : "cameras");
+    return;
+  }
+  if (kind === "cam" && theaterMode !== "cameras") {
+    theaterMode = "cameras";
+    relayoutVideoTiles();
+  }
+}
+
+function createVideoTile(key, label, muted, kind) {
+  const el = document.createElement("div");
+  el.className = "voice-video-tile";
+  el.dataset.key = key;
+  el.dataset.kind = kind;
+
+  const video = document.createElement("video");
+  video.autoplay = true;
+  video.playsInline = true;
+  video.muted = muted;
+
+  const labelEl = document.createElement("span");
+  labelEl.className = "voice-video-label";
+  labelEl.textContent = label;
+
+  el.appendChild(video);
+  el.appendChild(labelEl);
+  el.addEventListener("click", () => handleVideoTileClick(kind));
+
+  voiceVideoTiles.set(key, { el, video, labelEl });
+  voiceVideoGrid.appendChild(el);
+  relayoutVideoTiles();
+  return voiceVideoTiles.get(key);
+}
+
+function removeVideoTile(key) {
+  const tile = voiceVideoTiles.get(key);
+  if (!tile) return;
+  tile.video.srcObject = null;
+  tile.el.remove();
+  voiceVideoTiles.delete(key);
+  ensureVideoGridVisible();
+  relayoutVideoTiles();
+}
+
+function showLocalVideoTile(kind, stream) {
+  if (!voiceVideoGrid) return;
+  const key = `local:${kind}`;
+  const label = kind === "screen" ? "Your screen" : "You";
+  const tile = voiceVideoTiles.get(key) || createVideoTile(key, label, true, kind);
+  tile.video.srcObject = stream;
+  ensureVideoGridVisible();
+}
+
+function hideLocalVideoTile(kind) {
+  removeVideoTile(`local:${kind}`);
+}
+
+function showRemoteVideoTile(remoteSocketId, kind, stream) {
+  if (!voiceVideoGrid) return;
+  const key = `${remoteSocketId}:${kind}`;
+  const participant = voiceParticipants.get(remoteSocketId);
+  const label = `${participant ? participant.nickname : "Peer"}${kind === "screen" ? " (screen)" : ""}`;
+  const tile = voiceVideoTiles.get(key) || createVideoTile(key, label, false, kind);
+  tile.labelEl.textContent = label;
+  tile.video.srcObject = stream;
+  ensureVideoGridVisible();
+}
+
+function hideRemoteVideoTile(remoteSocketId, kind) {
+  removeVideoTile(`${remoteSocketId}:${kind}`);
+}
+
+function clearVideoGrid() {
+  closeVideoTheater();
+  for (const key of Array.from(voiceVideoTiles.keys())) {
+    removeVideoTile(key);
+  }
+}
+
+function sendVideoMeta(remoteSocketId, kind, streamId, active) {
+  socket.emit("voiceSignal", {
+    to: remoteSocketId,
+    data: { type: "video-meta", kind, streamId, active }
+  });
+}
+
+function addAllLocalTracksTo(pc, remoteSocketId) {
   if (voiceLocalStream) {
     for (const track of voiceLocalStream.getTracks()) {
       pc.addTrack(track, voiceLocalStream);
     }
   }
+  if (voiceCamStream) {
+    const sender = pc.addTrack(voiceCamStream.getVideoTracks()[0], voiceCamStream);
+    voiceCamSenders.set(remoteSocketId, sender);
+    sendVideoMeta(remoteSocketId, "cam", voiceCamStream.id, true);
+  }
+  if (voiceScreenStream) {
+    const sender = pc.addTrack(voiceScreenStream.getVideoTracks()[0], voiceScreenStream);
+    voiceScreenSenders.set(remoteSocketId, sender);
+    sendVideoMeta(remoteSocketId, "screen", voiceScreenStream.id, true);
+  }
+}
+
+function createVoicePeerConnection(remoteSocketId) {
+  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  pc.polite = socket.id < remoteSocketId;
+  pc.makingOffer = false;
+  pc.ignoreOffer = false;
+
+  addAllLocalTracksTo(pc, remoteSocketId);
 
   pc.onicecandidate = (event) => {
     if (event.candidate) {
@@ -1938,21 +2192,53 @@ function createVoicePeerConnection(remoteSocketId) {
     }
   };
 
-  pc.ontrack = (event) => {
-    const stream = event.streams[0] || new MediaStream([event.track]);
-    let audioEl = voiceAudioElements.get(remoteSocketId);
-    if (!audioEl) {
-      audioEl = document.createElement("audio");
-      audioEl.autoplay = true;
-      audioEl.playsInline = true;
-      audioEl.style.display = "none";
-      audioEl.muted = !!voiceDeafened;
-      audioEl.volume = getVoiceUserVolume(remoteSocketId) / 100;
-      document.body.appendChild(audioEl);
-      voiceAudioElements.set(remoteSocketId, audioEl);
+  pc.onnegotiationneeded = async () => {
+    try {
+      pc.makingOffer = true;
+      await pc.setLocalDescription();
+      socket.emit("voiceSignal", {
+        to: remoteSocketId,
+        data: { type: "description", description: pc.localDescription }
+      });
+    } catch (error) {
+      console.error("voice negotiation error:", error);
+    } finally {
+      pc.makingOffer = false;
     }
-    audioEl.srcObject = stream;
-    tryPlayRemoteAudio(audioEl);
+  };
+
+  pc.ontrack = (event) => {
+    if (event.track.kind === "audio") {
+      const stream = event.streams[0] || new MediaStream([event.track]);
+      let audioEl = voiceAudioElements.get(remoteSocketId);
+      if (!audioEl) {
+        audioEl = document.createElement("audio");
+        audioEl.autoplay = true;
+        audioEl.playsInline = true;
+        audioEl.style.display = "none";
+        audioEl.muted = !!voiceDeafened;
+        audioEl.volume = getVoiceUserVolume(remoteSocketId) / 100;
+        document.body.appendChild(audioEl);
+        voiceAudioElements.set(remoteSocketId, audioEl);
+      }
+      audioEl.srcObject = stream;
+      tryPlayRemoteAudio(audioEl);
+      return;
+    }
+
+    const stream = event.streams[0] || new MediaStream([event.track]);
+    const streamId = stream.id;
+    const meta = voiceRemoteVideoMeta.get(streamId);
+    if (meta) {
+      showRemoteVideoTile(remoteSocketId, meta.kind, stream);
+    } else {
+      voicePendingRemoteStreams.set(`${remoteSocketId}:${streamId}`, stream);
+    }
+
+    event.track.onended = () => {
+      const currentMeta = voiceRemoteVideoMeta.get(streamId);
+      hideRemoteVideoTile(remoteSocketId, currentMeta ? currentMeta.kind : "cam");
+    };
   };
 
   pc.onconnectionstatechange = () => {
@@ -1963,16 +2249,6 @@ function createVoicePeerConnection(remoteSocketId) {
 
   voicePeerConnections.set(remoteSocketId, pc);
   return pc;
-}
-
-async function initiateVoiceCall(remoteSocketId) {
-  const pc = createVoicePeerConnection(remoteSocketId);
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  socket.emit("voiceSignal", {
-    to: remoteSocketId,
-    data: { type: "offer", sdp: pc.localDescription }
-  });
 }
 
 async function joinVoiceChannel() {
@@ -2011,9 +2287,7 @@ async function joinVoiceChannel() {
     addSystemMessage(">>> Voice connected");
 
     for (const remoteSocketId of (joinData.peers || [])) {
-      initiateVoiceCall(remoteSocketId).catch((error) => {
-        console.error("initiateVoiceCall error:", error);
-      });
+      createVoicePeerConnection(remoteSocketId);
     }
   } catch (error) {
     console.error("joinVoiceChannel error:", error);
@@ -2043,6 +2317,22 @@ function leaveVoiceChannel(notifyServer) {
     voiceLocalStream = null;
   }
 
+  if (voiceCamStream) {
+    voiceCamStream.getTracks().forEach((track) => track.stop());
+    voiceCamStream = null;
+  }
+
+  if (voiceScreenStream) {
+    voiceScreenStream.getTracks().forEach((track) => track.stop());
+    voiceScreenStream = null;
+  }
+
+  voiceCamSenders.clear();
+  voiceScreenSenders.clear();
+  voiceRemoteVideoMeta.clear();
+  voicePendingRemoteStreams.clear();
+  clearVideoGrid();
+
   voiceJoined = false;
   voiceMuted = false;
   voiceDeafened = false;
@@ -2050,6 +2340,111 @@ function leaveVoiceChannel(notifyServer) {
   voiceParticipants.clear();
 
   renderVoiceParticipants();
+  updateVoiceButtons();
+}
+
+async function toggleVoiceCam() {
+  if (!voiceJoined) return;
+
+  if (voiceCamStream) {
+    stopVoiceCam();
+    return;
+  }
+
+  try {
+    voiceCamStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }
+    });
+  } catch (error) {
+    console.error("camera getUserMedia error:", error);
+    try {
+      voiceCamStream = await navigator.mediaDevices.getUserMedia({ video: true });
+    } catch (fallbackError) {
+      console.error("camera getUserMedia fallback error:", fallbackError);
+      addSystemMessage(`>>> Voice error: camera access denied (${fallbackError.name || "unknown"})`);
+      return;
+    }
+  }
+
+  showLocalVideoTile("cam", voiceCamStream);
+  const camTrack = voiceCamStream.getVideoTracks()[0];
+  for (const [remoteSocketId, pc] of voicePeerConnections) {
+    const sender = pc.addTrack(camTrack, voiceCamStream);
+    voiceCamSenders.set(remoteSocketId, sender);
+    sendVideoMeta(remoteSocketId, "cam", voiceCamStream.id, true);
+  }
+  updateVoiceButtons();
+}
+
+function stopVoiceCam() {
+  if (!voiceCamStream) return;
+  const streamId = voiceCamStream.id;
+
+  for (const [remoteSocketId, pc] of voicePeerConnections) {
+    const sender = voiceCamSenders.get(remoteSocketId);
+    if (sender) {
+      try { pc.removeTrack(sender); } catch (_) {}
+    }
+    sendVideoMeta(remoteSocketId, "cam", streamId, false);
+  }
+  voiceCamSenders.clear();
+
+  voiceCamStream.getTracks().forEach((track) => track.stop());
+  voiceCamStream = null;
+  hideLocalVideoTile("cam");
+  updateVoiceButtons();
+}
+
+async function toggleVoiceScreen() {
+  if (!voiceJoined) return;
+
+  if (voiceScreenStream) {
+    stopVoiceScreen();
+    return;
+  }
+
+  if (!screenShareSupported) {
+    addSystemMessage(">>> Voice error: screen sharing is not supported on this device");
+    return;
+  }
+
+  try {
+    voiceScreenStream = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: { ideal: 30, max: 30 } },
+      audio: false
+    });
+  } catch (error) {
+    return;
+  }
+
+  const screenTrack = voiceScreenStream.getVideoTracks()[0];
+  screenTrack.onended = () => stopVoiceScreen();
+
+  showLocalVideoTile("screen", voiceScreenStream);
+  for (const [remoteSocketId, pc] of voicePeerConnections) {
+    const sender = pc.addTrack(screenTrack, voiceScreenStream);
+    voiceScreenSenders.set(remoteSocketId, sender);
+    sendVideoMeta(remoteSocketId, "screen", voiceScreenStream.id, true);
+  }
+  updateVoiceButtons();
+}
+
+function stopVoiceScreen() {
+  if (!voiceScreenStream) return;
+  const streamId = voiceScreenStream.id;
+
+  for (const [remoteSocketId, pc] of voicePeerConnections) {
+    const sender = voiceScreenSenders.get(remoteSocketId);
+    if (sender) {
+      try { pc.removeTrack(sender); } catch (_) {}
+    }
+    sendVideoMeta(remoteSocketId, "screen", streamId, false);
+  }
+  voiceScreenSenders.clear();
+
+  voiceScreenStream.getTracks().forEach((track) => track.stop());
+  voiceScreenStream = null;
+  hideLocalVideoTile("screen");
   updateVoiceButtons();
 }
 
@@ -2139,6 +2534,38 @@ if (voiceDeafenBtn) {
   });
 }
 
+if (voiceCamBtn) {
+  voiceCamBtn.addEventListener("click", () => {
+    toggleVoiceCam().catch((error) => {
+      console.error("voice cam toggle error:", error);
+    });
+  });
+}
+
+if (voiceScreenBtn) {
+  voiceScreenBtn.addEventListener("click", () => {
+    toggleVoiceScreen().catch((error) => {
+      console.error("voice screen toggle error:", error);
+    });
+  });
+}
+
+if (voiceTheaterClose) {
+  voiceTheaterClose.addEventListener("click", () => closeVideoTheater());
+}
+
+if (voiceTheater) {
+  voiceTheater.addEventListener("click", (event) => {
+    if (
+      event.target === voiceTheater ||
+      event.target === voiceTheaterGrid ||
+      event.target === voiceTheaterStreamMain
+    ) {
+      closeVideoTheater();
+    }
+  });
+}
+
 socket.on("voiceParticipants", ({ participants } = {}) => {
   const nextParticipants = new Map();
   (participants || []).forEach((participant) => {
@@ -2160,23 +2587,40 @@ socket.on("voiceRoomClosed", () => {
 socket.on("voiceSignal", async ({ from, data } = {}) => {
   if (!voiceJoined || !from || !data) return;
   try {
-    if (data.type === "offer") {
+    if (data.type === "description") {
       const pc = voicePeerConnections.get(from) || createVoicePeerConnection(from);
-      await pc.setRemoteDescription(data.sdp);
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      socket.emit("voiceSignal", { to: from, data: { type: "answer", sdp: pc.localDescription } });
-    } else if (data.type === "answer") {
-      const pc = voicePeerConnections.get(from);
-      if (pc) await pc.setRemoteDescription(data.sdp);
+      const description = data.description;
+      const offerCollision = description.type === "offer" && (pc.makingOffer || pc.signalingState !== "stable");
+      pc.ignoreOffer = !pc.polite && offerCollision;
+      if (pc.ignoreOffer) return;
+
+      await pc.setRemoteDescription(description);
+      if (description.type === "offer") {
+        await pc.setLocalDescription();
+        socket.emit("voiceSignal", { to: from, data: { type: "description", description: pc.localDescription } });
+      }
     } else if (data.type === "ice-candidate" && data.candidate) {
       const pc = voicePeerConnections.get(from);
       if (pc) {
         try {
           await pc.addIceCandidate(data.candidate);
         } catch (error) {
-          console.error("addIceCandidate error:", error);
+          if (!pc.ignoreOffer) console.error("addIceCandidate error:", error);
         }
+      }
+    } else if (data.type === "video-meta" && data.streamId && data.kind) {
+      if (data.active) {
+        voiceRemoteVideoMeta.set(data.streamId, { kind: data.kind, from });
+        const pendingKey = `${from}:${data.streamId}`;
+        const pendingStream = voicePendingRemoteStreams.get(pendingKey);
+        if (pendingStream) {
+          showRemoteVideoTile(from, data.kind, pendingStream);
+          voicePendingRemoteStreams.delete(pendingKey);
+        }
+      } else {
+        voiceRemoteVideoMeta.delete(data.streamId);
+        hideRemoteVideoTile(from, data.kind);
+        voicePendingRemoteStreams.delete(`${from}:${data.streamId}`);
       }
     }
   } catch (error) {
@@ -2196,6 +2640,7 @@ function handleEscapeKey(e) {
         closeVoiceContextMenu();
         closeUploadChoiceMenu();
         closeFullImageModal();
+        closeVideoTheater();
         hideSafetyModal();
         hideDragIndicator();
         document.body.style.cursor = '';
