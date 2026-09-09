@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700&family=Share+Tech+Mono&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700&family=Share+Tech+Mono&family=Jura:wght@400;500;700&display=swap');
   </style>
 </head>
 
@@ -67,6 +67,10 @@
           <button id="githubBtn" class="control-btn github-btn">
             <i class="fab fa-github"></i> GITHUB
           </button>
+          <a href="https://github.com/badover/freegram-windows/releases/download/Windows/FreeGram.Setup.1.0.1.exe" class="control-btn windows-btn" id="windowsDownloadBtn" target="_blank" rel="noopener noreferrer">
+            <span class="new-badge">NEW</span>
+            <i class="fab fa-windows"></i> DOWNLOAD WINDOWS APP
+          </a>
         </div>
 
         <div id="loginError" class="error-display"></div>
@@ -196,6 +200,28 @@
 
         <div class="repo-info">
           <p><i class="fab fa-github"></i> Open Source: <a href="https://github.com/badover/FreeGram" target="_blank" class="neon-blue">github.com/badover/FreeGram</a></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="leaveConfirmModal" class="safety-modal">
+    <div class="safety-content">
+      <div class="safety-header">
+        <h2><i class="fas fa-sign-out-alt"></i> LEAVE ROOM</h2>
+        <button class="close-modal" id="leaveConfirmClose">&times;</button>
+      </div>
+      <div class="safety-body">
+        <p>Are you sure you want to leave this room?</p>
+        <div class="button-group">
+          <button id="leaveConfirmYes" class="cyber-btn cyber-btn-primary">
+            <span class="btn-text">LEAVE</span>
+            <span class="btn-glow"></span>
+          </button>
+          <button id="leaveConfirmNo" class="cyber-btn cyber-btn-secondary">
+            <span class="btn-text">CANCEL</span>
+            <span class="btn-glow"></span>
+          </button>
         </div>
       </div>
     </div>

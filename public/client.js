@@ -20,6 +20,10 @@ const githubBtn = document.getElementById("githubBtn");
 const leaveRoomBtn = document.getElementById("leaveRoomBtn");
 const safetyModal = document.getElementById("safetyModal");
 const closeModalBtn = document.querySelector('.close-modal');
+const leaveConfirmModal = document.getElementById("leaveConfirmModal");
+const leaveConfirmYesBtn = document.getElementById("leaveConfirmYes");
+const leaveConfirmNoBtn = document.getElementById("leaveConfirmNo");
+const leaveConfirmCloseBtn = document.getElementById("leaveConfirmClose");
 const voiceJoinBtn = document.getElementById("voiceJoinBtn");
 const voiceLeaveBtn = document.getElementById("voiceLeaveBtn");
 const voiceMuteBtn = document.getElementById("voiceMuteBtn");
@@ -411,6 +415,29 @@ if (safetyModal) {
   });
 }
 
+if (leaveConfirmYesBtn) {
+  leaveConfirmYesBtn.addEventListener('click', () => {
+    hideLeaveConfirmModal();
+    performLeaveRoom();
+  });
+}
+
+if (leaveConfirmNoBtn) {
+  leaveConfirmNoBtn.addEventListener('click', hideLeaveConfirmModal);
+}
+
+if (leaveConfirmCloseBtn) {
+  leaveConfirmCloseBtn.addEventListener('click', hideLeaveConfirmModal);
+}
+
+if (leaveConfirmModal) {
+  leaveConfirmModal.addEventListener('click', (e) => {
+    if (e.target === leaveConfirmModal) {
+      hideLeaveConfirmModal();
+    }
+  });
+}
+
 
 if (leaveRoomBtn) {
   leaveRoomBtn.addEventListener('click', leaveRoom);
@@ -431,21 +458,35 @@ function hideSafetyModal() {
 
 function leaveRoom() {
   if (!currentRoom) return;
-  
-  if (confirm('Are you sure you want to leave this room?')) {
-    leaveVoiceChannel(true);
-    cleanupP2PState();
-    socket.emit('leaveRoom', { room: currentRoom });
-    
-    chatScreen.style.display = 'none';
-    loginScreen.style.display = 'flex';
-    
-    currentRoom = '';
-    currentNickname = '';
-    messagesList.innerHTML = '';
-    
-    addSystemMessage('>>> Left the room');
+
+  if (leaveConfirmModal) {
+    leaveConfirmModal.style.display = 'flex';
+  } else {
+    performLeaveRoom();
   }
+}
+
+function hideLeaveConfirmModal() {
+  if (leaveConfirmModal) {
+    leaveConfirmModal.style.display = 'none';
+  }
+}
+
+function performLeaveRoom() {
+  if (!currentRoom) return;
+
+  leaveVoiceChannel(true);
+  cleanupP2PState();
+  socket.emit('leaveRoom', { room: currentRoom });
+
+  chatScreen.style.display = 'none';
+  loginScreen.style.display = 'flex';
+
+  currentRoom = '';
+  currentNickname = '';
+  messagesList.innerHTML = '';
+
+  addSystemMessage('>>> Left the room');
 }
 
 function getErrorMessage(payload, fallback = "An unexpected error occurred") {
@@ -2121,6 +2162,7 @@ function showLocalVideoTile(kind, stream) {
   const label = kind === "screen" ? "Your screen" : "You";
   const tile = voiceVideoTiles.get(key) || createVideoTile(key, label, true, kind);
   tile.video.srcObject = stream;
+  tile.video.play().catch(error => console.error("local video play() failed:", error));
   ensureVideoGridVisible();
 }
 
@@ -2136,6 +2178,7 @@ function showRemoteVideoTile(remoteSocketId, kind, stream) {
   const tile = voiceVideoTiles.get(key) || createVideoTile(key, label, false, kind);
   tile.labelEl.textContent = label;
   tile.video.srcObject = stream;
+  tile.video.play().catch(error => console.error("remote video play() failed:", error));
   ensureVideoGridVisible();
 }
 
