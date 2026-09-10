@@ -16,6 +16,9 @@
   <a href="bitcoin:bc1qewj7zwanksdk9246arhmjh4cyh734q082ykvlx">
     <img src="https://img.shields.io/badge/Support%20us%20with%20Bitcoin-F7931A?style=for-the-badge&logo=bitcoin&logoColor=white" alt="Support us with Bitcoin" />
   </a>
+  <a href="https://github.com/badover/freegram-windows">
+    <img src="https://img.shields.io/badge/Windows%20App-Source%20Code-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows App Source Code" />
+  </a>
 
 </p>
 
