@@ -1,8 +1,8 @@
-version: 1.0.1
+version: 1.0.2
 files:
-  - url: FreeGram Setup 1.0.1.exe
-    sha512: WqUamXq7tA/QIRhQguUcFpc/pdJMPzuTURnaLLJud69i0GhAshflpsQXZxwakWrKI7X5Z0pujZMiB4YT+Bu7mQ==
-    size: 79699502
-path: FreeGram Setup 1.0.1.exe
-sha512: WqUamXq7tA/QIRhQguUcFpc/pdJMPzuTURnaLLJud69i0GhAshflpsQXZxwakWrKI7X5Z0pujZMiB4YT+Bu7mQ==
-releaseDate: '2026-09-09T13:55:23.290Z'
+  - url: FreeGram Setup 1.0.2.exe
+    sha512: LMfnj9fTR5x+GM+SlaukABZMAFTBWKwDpmPnqOJiCmH+Z6BXw1kEyO1BI4UtPFLPRiuG/luGzK1Q0D298rPhSg==
+    size: 79699487
+path: FreeGram Setup 1.0.2.exe
+sha512: LMfnj9fTR5x+GM+SlaukABZMAFTBWKwDpmPnqOJiCmH+Z6BXw1kEyO1BI4UtPFLPRiuG/luGzK1Q0D298rPhSg==
+releaseDate: '2026-09-10T11:57:11.280Z'

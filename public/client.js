@@ -16,7 +16,8 @@ const userCountSpan = document.getElementById("userCount");
 const createRoomBtn = document.getElementById("createRoom");
 const joinRoomBtn = document.getElementById("joinRoom");
 const safetyBtn = document.getElementById("safetyBtn");
-const githubBtn = document.getElementById("githubBtn");
+const siteMenuToggle = document.getElementById("siteMenuToggle");
+const siteMenu = document.getElementById("siteMenu");
 const leaveRoomBtn = document.getElementById("leaveRoomBtn");
 const safetyModal = document.getElementById("safetyModal");
 const closeModalBtn = document.querySelector('.close-modal');
@@ -53,6 +54,8 @@ if (voiceScreenBtn && !screenShareSupported) {
 
 let currentRoom = "";
 let currentNickname = "";
+let fileAccessToken = null;
+let loginRequestPending = false;
 let typingUsers = new Map();
 let typingTimeout = null;
 let isTyping = false;
@@ -89,11 +92,371 @@ let voiceUnlockHintShown = false;
 let voiceContextMenu = null;
 
 const GENERIC_ERROR_MESSAGE = "Something went wrong. Please try again.";
+const IMAGE_PLACEHOLDER = "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=";
 const MAX_UPLOAD_SIZE = 50 * 1024 * 1024;
 const CHUNK_SIZE = 512 * 1024;
-const THUMBNAIL_SIZE_LIMIT = 8 * 1024 * 1024;
 const MAX_CHAT_LENGTH = 4000;
 const DEFAULT_VOICE_USER_VOLUME = 100;
+const THEME_STORAGE_KEY = "freegram-theme-v1";
+const ROUNDED_BUTTONS_STORAGE_KEY = "freegram-rounded-buttons-v1";
+const APPEARANCE_DB_NAME = "freegram-appearance";
+const APPEARANCE_DB_STORE = "settings";
+let customWallpaperUrl = null;
+const THEME_PRESETS = {
+  default: {
+    bg: "#050508", panel: "#05050f", surface: "#00050a", header: "#001428",
+    accent: "#00f3ff", accentAlt: "#ff00ff", text: "#e0f0ff", muted: "#88aacc",
+    incoming: "#00101a", outgoing: "#001a0e", border: "#00f3ff", grid: "rgba(0, 243, 255, 0.1)"
+  },
+  cyberpunk: {
+    bg: "#21080d", panel: "#12080b", surface: "#0c0507", header: "#1b090d",
+    accent: "#ff365d", accentAlt: "#ffc857", text: "#f3e7e9", muted: "#b99ba1",
+    incoming: "#2a0d13", outgoing: "#32151a", border: "#792535", grid: "rgba(255, 54, 93, 0.1)"
+  },
+  telegram: {
+    bg: "#17212b", panel: "#1c2733", surface: "#0e1621", header: "#242f3d",
+    accent: "#55c7a4", accentAlt: "#55c7a4", text: "#f1f4f6", muted: "#91a0ad",
+    incoming: "#202d3b", outgoing: "#244c45", border: "#344452", grid: "rgba(85, 199, 164, 0.07)"
+  },
+  instagram: {
+    bg: "#000000", panel: "#121212", surface: "#000000", header: "#1b1b1b",
+    accent: "#d62976", accentAlt: "#a645d8", text: "#f5f5f5", muted: "#a8a8a8",
+    incoming: "#202020", outgoing: "#38213a", border: "#363636", grid: "rgba(214, 41, 118, 0.07)"
+  },
+  discord: {
+    bg: "#313338", panel: "#2b2d31", surface: "#1e1f22", header: "#2b2d31",
+    accent: "#4752c4", accentAlt: "#c8c9cd", text: "#dbdee1", muted: "#949ba4",
+    incoming: "#313338", outgoing: "#383a40", border: "#3f4147", grid: "rgba(71, 82, 196, 0.025)"
+  }
+};
+
+function applyRoundedButtonsPreference(enabled) {
+  document.body.dataset.roundedButtons = String(Boolean(enabled));
+}
+
+function applyThemePalette(palette, themeName) {
+  const roundedButtonsEnabled = document.body.dataset.roundedButtons === "true";
+  const root = document.documentElement;
+  if (themeName === "default") {
+    [
+      "--theme-bg", "--theme-panel", "--theme-surface", "--theme-header",
+      "--theme-accent", "--theme-accent-alt", "--theme-text", "--theme-muted",
+      "--theme-incoming", "--theme-outgoing", "--theme-border",
+      "--bg-dark", "--bg-darker", "--neon-blue", "--neon-pink", "--neon-yellow",
+      "--neon-green", "--text-primary", "--text-secondary", "--grid-color"
+    ].forEach((name) => root.style.removeProperty(name));
+    delete document.body.dataset.theme;
+    applyRoundedButtonsPreference(roundedButtonsEnabled);
+    return;
+  }
+
+  const variableMap = {
+    "--theme-bg": palette.bg,
+    "--theme-panel": palette.panel,
+    "--theme-surface": palette.surface,
+    "--theme-header": palette.header,
+    "--theme-accent": palette.accent,
+    "--theme-accent-alt": palette.accentAlt,
+    "--theme-text": palette.text,
+    "--theme-muted": palette.muted,
+    "--theme-incoming": palette.incoming,
+    "--theme-outgoing": palette.outgoing,
+    "--theme-border": palette.border,
+    "--bg-dark": palette.panel,
+    "--bg-darker": palette.bg,
+    "--neon-blue": palette.accent,
+    "--neon-pink": palette.accentAlt,
+    "--neon-yellow": palette.accentAlt,
+    "--neon-green": palette.accent,
+    "--text-primary": palette.text,
+    "--text-secondary": palette.muted,
+    "--grid-color": palette.grid
+  };
+  Object.entries(variableMap).forEach(([name, value]) => root.style.setProperty(name, value));
+  document.body.dataset.theme = themeName;
+  applyRoundedButtonsPreference(roundedButtonsEnabled);
+}
+
+function saveTheme(palette, themeName) {
+  applyThemePalette(palette, themeName);
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, JSON.stringify({ themeName, palette }));
+  } catch (error) {
+    console.warn("Could not save appearance settings:", error);
+  }
+}
+
+function isValidThemePalette(palette) {
+  const keys = ["bg", "panel", "surface", "header", "accent", "accentAlt", "text", "muted", "incoming", "outgoing", "border"];
+  return palette &&
+    keys.every((key) => typeof palette[key] === "string" && /^#[0-9a-f]{6}$/i.test(palette[key])) &&
+    typeof palette.grid === "string" &&
+    /^rgba\(\d{1,3}, \d{1,3}, \d{1,3}, 0\.\d+\)$/.test(palette.grid);
+}
+
+function shadeHex(hex, amount) {
+  const value = Number.parseInt(hex.slice(1), 16);
+  const channels = [16, 8, 0].map((shift) => Math.max(0, Math.min(255, ((value >> shift) & 255) + amount)));
+  return `#${channels.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function openAppearanceDatabase() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(APPEARANCE_DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore(APPEARANCE_DB_STORE);
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("Could not open appearance storage"));
+  });
+}
+
+async function readSavedWallpaper() {
+  const db = await openAppearanceDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(APPEARANCE_DB_STORE, "readonly");
+    const request = transaction.objectStore(APPEARANCE_DB_STORE).get("background-image");
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error || new Error("Could not read background image"));
+    transaction.oncomplete = () => db.close();
+    transaction.onerror = () => db.close();
+  });
+}
+
+async function saveWallpaper(blob) {
+  const db = await openAppearanceDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(APPEARANCE_DB_STORE, "readwrite");
+    transaction.objectStore(APPEARANCE_DB_STORE).put(blob, "background-image");
+    transaction.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    transaction.onerror = () => {
+      db.close();
+      reject(transaction.error || new Error("Could not save background image"));
+    };
+    transaction.onabort = () => {
+      db.close();
+      reject(transaction.error || new Error("Background image save was cancelled"));
+    };
+  });
+}
+
+async function removeSavedWallpaper() {
+  const db = await openAppearanceDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(APPEARANCE_DB_STORE, "readwrite");
+    transaction.objectStore(APPEARANCE_DB_STORE).delete("background-image");
+    transaction.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    transaction.onerror = () => {
+      db.close();
+      reject(transaction.error || new Error("Could not remove background image"));
+    };
+    transaction.onabort = () => {
+      db.close();
+      reject(transaction.error || new Error("Background image removal was cancelled"));
+    };
+  });
+}
+
+function applyWallpaper(blob) {
+  if (customWallpaperUrl) URL.revokeObjectURL(customWallpaperUrl);
+  customWallpaperUrl = blob ? URL.createObjectURL(blob) : null;
+  if (customWallpaperUrl) {
+    document.body.style.setProperty("--custom-wallpaper", `url("${customWallpaperUrl}")`);
+    document.body.dataset.customWallpaper = "true";
+  } else {
+    document.body.style.removeProperty("--custom-wallpaper");
+    delete document.body.dataset.customWallpaper;
+  }
+}
+
+function setupThemes() {
+  let savedTheme = null;
+  try {
+    savedTheme = JSON.parse(localStorage.getItem(THEME_STORAGE_KEY) || "null");
+  } catch (error) {
+    console.warn("Could not read saved appearance settings:", error);
+  }
+
+  const activeThemeName = savedTheme?.themeName === "custom" && isValidThemePalette(savedTheme.palette)
+    ? "custom"
+    : typeof savedTheme?.themeName === "string" && THEME_PRESETS[savedTheme.themeName]
+      ? savedTheme.themeName
+      : "default";
+  const activePalette = activeThemeName === "custom" ? savedTheme.palette : THEME_PRESETS[activeThemeName];
+  applyThemePalette(activePalette, activeThemeName);
+
+  const modal = document.getElementById("themeModal");
+  const backgroundInput = document.getElementById("themeBackgroundColor");
+  const accentInput = document.getElementById("themeAccentColor");
+  const textInput = document.getElementById("themeTextColor");
+  const preview = document.getElementById("themePreview");
+  const backgroundImageInput = document.getElementById("themeBackgroundImage");
+  const backgroundStatus = document.getElementById("themeBackgroundStatus");
+  const roundedButtonsToggle = document.getElementById("roundedButtonsToggle");
+  backgroundInput.value = activePalette.bg;
+  accentInput.value = activePalette.accent;
+  textInput.value = activePalette.text;
+  try {
+    roundedButtonsToggle.checked = localStorage.getItem(ROUNDED_BUTTONS_STORAGE_KEY) === "true";
+  } catch (error) {
+    console.warn("Could not read button shape setting:", error);
+  }
+  applyRoundedButtonsPreference(roundedButtonsToggle.checked);
+  document.querySelectorAll("[data-theme-preset]").forEach((card) => {
+    card.setAttribute("aria-pressed", String(card.dataset.themePreset === activeThemeName));
+  });
+
+  const open = () => {
+    if (modal) modal.style.display = "flex";
+  };
+  [document.getElementById("themeSettingsBtn"), document.getElementById("chatThemeSettingsBtn")]
+    .filter(Boolean)
+    .forEach((button) => button.addEventListener("click", open));
+
+  document.getElementById("themeModalClose")?.addEventListener("click", () => {
+    modal.style.display = "none";
+  });
+  modal?.addEventListener("click", (event) => {
+    if (event.target === modal) modal.style.display = "none";
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && modal?.style.display === "flex") modal.style.display = "none";
+  });
+
+  document.querySelectorAll("[data-theme-preset]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const name = button.dataset.themePreset;
+      const palette = THEME_PRESETS[name];
+      if (!palette) return;
+      saveTheme(palette, name);
+      backgroundInput.value = palette.bg;
+      accentInput.value = palette.accent;
+      textInput.value = palette.text;
+      document.querySelectorAll("[data-theme-preset]").forEach((card) => {
+        card.setAttribute("aria-pressed", String(card === button));
+      });
+      updateCustomPreview();
+    });
+  });
+
+  const updateCustomPreview = () => {
+    if (!preview) return;
+    preview.style.setProperty("--preview-bg", backgroundInput.value);
+    preview.style.setProperty("--preview-accent", accentInput.value);
+    preview.style.setProperty("--preview-text", textInput.value);
+  };
+  [backgroundInput, accentInput, textInput].forEach((input) => input?.addEventListener("input", updateCustomPreview));
+  updateCustomPreview();
+
+  readSavedWallpaper()
+    .then((blob) => {
+      if (blob instanceof Blob && blob.type.startsWith("image/")) {
+        applyWallpaper(blob);
+        backgroundStatus.textContent = "Your background image is active on this device.";
+      }
+    })
+    .catch((error) => {
+      console.error("Could not load saved background image:", error);
+      backgroundStatus.textContent = "Could not load the saved background image.";
+    });
+
+  backgroundImageInput.addEventListener("change", async () => {
+    const [file] = backgroundImageInput.files || [];
+    if (!file) return;
+    if (!["image/png", "image/jpeg", "image/webp", "image/avif"].includes(file.type)) {
+      backgroundStatus.textContent = "Choose a PNG, JPEG, WebP, or AVIF image.";
+      backgroundImageInput.value = "";
+      return;
+    }
+    if (file.size > 20 * 1024 * 1024) {
+      backgroundStatus.textContent = "Background image must be 20 MB or smaller.";
+      backgroundImageInput.value = "";
+      return;
+    }
+    try {
+      const decodedImage = await createImageBitmap(file);
+      const imageIsTooLarge = decodedImage.width * decodedImage.height > 20_000_000;
+      decodedImage.close();
+      if (imageIsTooLarge) {
+        backgroundStatus.textContent = "Image dimensions must not exceed 20 megapixels.";
+        return;
+      }
+      await saveWallpaper(file);
+      applyWallpaper(file);
+      backgroundStatus.textContent = "Background image saved on this device.";
+    } catch (error) {
+      console.error("Could not save background image:", error);
+      backgroundStatus.textContent = "Could not save the background image.";
+    } finally {
+      backgroundImageInput.value = "";
+    }
+  });
+
+  document.getElementById("clearThemeBackgroundBtn").addEventListener("click", async () => {
+    try {
+      await removeSavedWallpaper();
+      applyWallpaper(null);
+      backgroundStatus.textContent = "";
+    } catch (error) {
+      console.error("Could not remove background image:", error);
+      backgroundStatus.textContent = "Could not remove the background image.";
+    }
+  });
+
+  roundedButtonsToggle.addEventListener("change", () => {
+    applyRoundedButtonsPreference(roundedButtonsToggle.checked);
+    try {
+      localStorage.setItem(ROUNDED_BUTTONS_STORAGE_KEY, String(roundedButtonsToggle.checked));
+    } catch (error) {
+      console.error("Could not save button shape setting:", error);
+    }
+  });
+
+  document.getElementById("applyCustomThemeBtn")?.addEventListener("click", () => {
+    const bg = backgroundInput.value;
+    const accent = accentInput.value;
+    const text = textInput.value;
+    const palette = {
+      ...THEME_PRESETS.cyberpunk,
+      bg,
+      panel: shadeHex(bg, 10),
+      surface: shadeHex(bg, 4),
+      header: shadeHex(bg, 16),
+      accent,
+      accentAlt: accent,
+      text,
+      muted: shadeHex(text, -85),
+      incoming: shadeHex(bg, 24),
+      outgoing: shadeHex(bg, 32),
+      border: shadeHex(bg, 42),
+      grid: `rgba(${Number.parseInt(accent.slice(1, 3), 16)}, ${Number.parseInt(accent.slice(3, 5), 16)}, ${Number.parseInt(accent.slice(5, 7), 16)}, 0.08)`
+    };
+    saveTheme(palette, "custom");
+    document.querySelectorAll("[data-theme-preset]").forEach((card) => {
+      card.setAttribute("aria-pressed", "false");
+    });
+  });
+
+  document.getElementById("resetThemeBtn")?.addEventListener("click", () => {
+    saveTheme(THEME_PRESETS.default, "default");
+    backgroundInput.value = THEME_PRESETS.default.bg;
+    accentInput.value = THEME_PRESETS.default.accent;
+    textInput.value = THEME_PRESETS.default.text;
+    updateCustomPreview();
+    document.querySelectorAll("[data-theme-preset]").forEach((card) => {
+      card.setAttribute("aria-pressed", String(card.dataset.themePreset === "default"));
+    });
+  });
+}
+
+setupThemes();
+
 const STUN_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" }
@@ -102,13 +465,12 @@ let ICE_SERVERS = [...STUN_SERVERS];
 
 function refreshIceServers() {
   socket.emit("getIceServers", {}, (response) => {
-    console.log("getIceServers response:", JSON.stringify(response));
     if (!response || !response.ok || !response.turnServer) {
-      console.warn("No TURN server received — ICE_SERVERS stays STUN-only:", JSON.stringify(ICE_SERVERS));
+      console.warn("No TURN relay configuration received; using STUN servers only.");
       return;
     }
     ICE_SERVERS = [...STUN_SERVERS, response.turnServer];
-    console.log("ICE_SERVERS updated with TURN:", JSON.stringify(ICE_SERVERS));
+    console.info("TURN relay configuration received.");
   });
 }
 const VOICE_VAD_INTERVAL_MS = 60;
@@ -117,19 +479,16 @@ const VOICE_VAD_HANGOVER_MS = 400;
 const VOICE_VAD_MARGIN = 3.5;
 const VOICE_VAD_NOISE_SMOOTHING = 0.05;
 const P2P_CHUNK_SIZE = 256 * 1024;
-const P2P_BUFFERED_AMOUNT_HIGH = 16 * 1024 * 1024;
+const P2P_BUFFERED_AMOUNT_HIGH = 4 * 1024 * 1024;
 const P2P_BLOB_COALESCE_BYTES = 8 * 1024 * 1024;
+const MAX_DROPPED_FILES = 5;
+let mediaUploadInProgress = false;
 
 function normalizeUploadMime(file) {
   if (file && typeof file.type === "string" && file.type.trim()) {
     return file.type.trim();
   }
   return "application/octet-stream";
-}
-
-function isPreviewableImage(fileType) {
-  return typeof fileType === "string" &&
-    /^image\/(jpeg|jpg|png|gif|webp)$/i.test(fileType);
 }
 
 function getFileEmoji(fileType = "", fileName = "") {
@@ -143,39 +502,6 @@ function getFileEmoji(fileType = "", fileName = "") {
   if (/(zip|rar|7z|tar|gz)/.test(normalizedType) || ["zip", "rar", "7z", "tar", "gz"].includes(ext)) return "🗜️";
   if (/(json|xml|javascript|typescript|shellscript|x-sh|html|css|csv|plain)/.test(normalizedType) || ["js", "ts", "json", "xml", "html", "css", "sh", "txt", "md", "csv"].includes(ext)) return "🧾";
   return "📎";
-}
-
-function buildThumbnailAndSend(file, fileData, replyTo) {
-  if (!isPreviewableImage(file.type) || file.size > THUMBNAIL_SIZE_LIMIT) {
-    sendMediaToServer(file, fileData, null, replyTo);
-    return;
-  }
-
-  const objectUrl = URL.createObjectURL(file);
-  const img = new Image();
-  img.onload = function() {
-    const displaySize = 150;
-    const renderSize = Math.round(displaySize * Math.min(window.devicePixelRatio || 1, 2));
-
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    canvas.width = renderSize;
-    canvas.height = renderSize;
-
-    const sourceSize = Math.min(img.naturalWidth, img.naturalHeight);
-    const sourceX = (img.naturalWidth - sourceSize) / 2;
-    const sourceY = (img.naturalHeight - sourceSize) / 2;
-    ctx.drawImage(img, sourceX, sourceY, sourceSize, sourceSize, 0, 0, renderSize, renderSize);
-
-    const thumbnail = canvas.toDataURL('image/jpeg', 0.82);
-    sendMediaToServer(file, fileData, thumbnail, replyTo);
-    URL.revokeObjectURL(objectUrl);
-  };
-  img.onerror = function() {
-    sendMediaToServer(file, fileData, null, replyTo);
-    URL.revokeObjectURL(objectUrl);
-  };
-  img.src = objectUrl;
 }
 
 function resizeChatInput() {
@@ -210,6 +536,7 @@ if (createRoomBtn) {
     }
 
     loginError.textContent = "";
+    loginRequestPending = true;
     socket.emit("createRoom", { room, password, nickname });
   });
 }
@@ -232,6 +559,7 @@ if (joinRoomBtn) {
     }
 
     loginError.textContent = "";
+    loginRequestPending = true;
     socket.emit("joinRoom", { room, password, nickname });
   });
 }
@@ -393,14 +721,42 @@ function createTypingIndicator() {
     updateTypingIndicatorPosition();
 }
 
-if (githubBtn) {
-  githubBtn.addEventListener('click', () => {
-    window.open('https://github.com/badover/FreeGram', '_blank');
+function closeSiteMenu(returnFocus = false) {
+  if (!siteMenu || !siteMenuToggle) return;
+  siteMenu.hidden = true;
+  siteMenuToggle.setAttribute("aria-expanded", "false");
+  if (returnFocus) siteMenuToggle.focus();
+}
+
+if (siteMenuToggle && siteMenu) {
+  siteMenuToggle.addEventListener("click", () => {
+    const isOpen = !siteMenu.hidden;
+    siteMenu.hidden = isOpen;
+    siteMenuToggle.setAttribute("aria-expanded", String(!isOpen));
+  });
+
+  siteMenu.querySelectorAll("a").forEach((link) => {
+    link.addEventListener("click", () => closeSiteMenu());
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!siteMenu.hidden && !event.target.closest(".site-menu")) {
+      closeSiteMenu();
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !siteMenu.hidden) {
+      closeSiteMenu(true);
+    }
   });
 }
 
 if (safetyBtn) {
-  safetyBtn.addEventListener('click', showSafetyModal);
+  safetyBtn.addEventListener('click', () => {
+    closeSiteMenu();
+    showSafetyModal();
+  });
 }
 
 if (closeModalBtn) {
@@ -478,6 +834,7 @@ function performLeaveRoom() {
   leaveVoiceChannel(true);
   cleanupP2PState();
   socket.emit('leaveRoom', { room: currentRoom });
+  fileAccessToken = null;
 
   chatScreen.style.display = 'none';
   loginScreen.style.display = 'flex';
@@ -530,7 +887,7 @@ function safeText(text) {
 }
 
 function safeMediaURL(url) {
-    if (typeof url !== 'string') return '#';
+    if (typeof url !== 'string' || !url) return '#';
     if (url.includes('javascript:') || 
       url.includes('data:text/html') ||
       url.includes('onerror=') ||
@@ -538,16 +895,19 @@ function safeMediaURL(url) {
       return '#';
     }
     if (url.startsWith('/uploads/')) {
-        const filename = url.substring(9); 
-        if (/^[a-zA-Z0-9\.\-]+$/.test(filename)) {
-            return url;
+        const cleanPath = url.split('?')[0];
+        const filename = cleanPath.substring(9);
+        if (/^[a-zA-Z0-9._-]+$/.test(filename)) {
+            return fileAccessToken ? `${cleanPath}?token=${encodeURIComponent(fileAccessToken)}` : cleanPath;
         }
+        return '#';
     }
     
     if (url.startsWith('data:image/jpeg;base64,') ||
         url.startsWith('data:image/png;base64,') ||
         url.startsWith('data:image/gif;base64,') ||
-        url.startsWith('data:image/webp;base64,')) {
+        url.startsWith('data:image/webp;base64,') ||
+        url.startsWith('data:image/avif;base64,')) {
         return url;
     }
     
@@ -559,30 +919,131 @@ function safeMediaURL(url) {
     return '#'; 
 }
 
+function downloadableMediaURL(url) {
+  const safeURL = safeMediaURL(url);
+  if (!safeURL || safeURL === '#' || !safeURL.startsWith("/uploads/")) return safeURL;
+  const cleanPath = safeURL.split('?')[0];
+  const tokenQuery = fileAccessToken ? `token=${encodeURIComponent(fileAccessToken)}&` : '';
+  return `${cleanPath}?${tokenQuery}download=1`;
+}
+
+async function downloadMediaFile(url, fileName) {
+  try {
+    const safeUrl = safeMediaURL(url);
+    if (!safeUrl || safeUrl === '#') {
+      console.error("Download failed: invalid URL", url);
+      return;
+    }
+    const downloadUrl = downloadableMediaURL(safeUrl);
+    
+    const response = await fetch(downloadUrl);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const blob = await response.blob();
+    
+    const cleanName = fileName || (safeUrl.split('/').pop() || 'download').split('?')[0];
+    
+    if (navigator.canShare && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) {
+      try {
+        const file = new File([blob], cleanName, { type: blob.type || 'application/octet-stream' });
+        if (navigator.canShare({ files: [file] })) {
+          await navigator.share({
+            files: [file],
+            title: cleanName
+          });
+          return;
+        }
+      } catch (shareError) {
+        if (shareError.name === 'AbortError') return;
+      }
+    }
+    
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = cleanName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+  } catch (error) {
+    console.warn("Direct blob download failed, falling back to direct navigation:", error);
+    const fallbackUrl = downloadableMediaURL(url);
+    const a = document.createElement('a');
+    a.href = fallbackUrl;
+    a.download = fileName || 'file';
+    a.target = '_blank';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+}
+
 socket.on("error", (payload) => {
   console.error("Socket error:", payload);
-  showError(GENERIC_ERROR_MESSAGE);
+  showError(getErrorMessage(payload, GENERIC_ERROR_MESSAGE));
 });
 
 socket.on("connect_error", (error) => {
   console.error("Connection error:", error);
-  showError(GENERIC_ERROR_MESSAGE);
+  if (loginRequestPending) {
+    loginRequestPending = false;
+    showError("Could not connect to the server. Check your connection and try again.");
+  }
 });
 
 socket.on("disconnect", (reason) => {
-  if (reason === "io client disconnect") return;
+  if (reason === "io client disconnect") {
+    fileAccessToken = null;
+    return;
+  }
   console.error("Disconnected:", reason);
-  showError(GENERIC_ERROR_MESSAGE);
+  if (currentRoom) {
+    addSystemMessage(">>> Connection interrupted. Reconnecting…");
+  }
 });
+
+function handleExpiredRoomSession() {
+  if (!currentRoom) return;
+  leaveVoiceChannel(false);
+  cleanupP2PState();
+  fileAccessToken = null;
+  loginError.textContent = "Connection expired. Rejoin the room to continue.";
+  chatScreen.style.display = "none";
+  loginScreen.style.display = "flex";
+  currentRoom = "";
+  currentNickname = "";
+  messagesList.innerHTML = "";
+}
+
+socket.on("connect", () => {
+  if (currentRoom && !socket.recovered) {
+    handleExpiredRoomSession();
+  }
+});
+
+socket.on("sessionRecovered", (data) => {
+  if (!data || data.room !== currentRoom) return;
+  currentNickname = data.nickname;
+  fileAccessToken = typeof data.fileAccessToken === "string" ? data.fileAccessToken : null;
+  currentRoomSpan.textContent = safeText(currentRoom).toUpperCase();
+  currentUserSpan.textContent = safeText(currentNickname).toUpperCase();
+  userCountSpan.textContent = data.userCount || 1;
+  addSystemMessage(">>> Connection restored.");
+});
+
+socket.on("sessionExpired", handleExpiredRoomSession);
 
 socket.on("roomError", (msg) => {
   console.error("Room error:", msg);
-  showError(GENERIC_ERROR_MESSAGE);
+  loginRequestPending = false;
+  showError(msg);
 });
 
 socket.on("roomJoined", (data) => {
+  loginRequestPending = false;
   currentRoom = data.room;
   currentNickname = data.nickname;
+  fileAccessToken = typeof data.fileAccessToken === "string" ? data.fileAccessToken : null;
 
   currentRoomSpan.textContent = safeText(currentRoom).toUpperCase();
   currentUserSpan.textContent = safeText(currentNickname).toUpperCase();
@@ -614,6 +1075,7 @@ socket.on("roomClosed", (data) => {
     messagesList.innerHTML = "";
     currentRoom = "";
     currentNickname = "";
+    fileAccessToken = null;
   }, 3000);
 });
 
@@ -831,31 +1293,50 @@ function uint8ToBase64(bytes) {
 
 function emitUploadChunk(payload) {
   return new Promise((resolve, reject) => {
+    if (!socket.connected) {
+      reject(new Error("Disconnected before upload"));
+      return;
+    }
+
+    let settled = false;
     const timer = setTimeout(() => {
-      reject(new Error("Upload timed out"));
+      finish(new Error("Upload timed out"));
     }, 60000);
+
+    const onDisconnect = () => finish(new Error("Disconnected during upload"));
+    const finish = (error, response) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.off("disconnect", onDisconnect);
+      if (error) {
+        reject(error);
+      } else {
+        resolve(response);
+      }
+    };
+
+    socket.once("disconnect", onDisconnect);
 
     try {
       socket.timeout(60000).emit("uploadMediaChunk", payload, (err, response) => {
-        clearTimeout(timer);
         if (err) {
-          reject(err instanceof Error ? err : new Error("Upload timed out"));
+          finish(err instanceof Error ? err : new Error("Upload timed out"));
           return;
         }
         if (!response || response.ok === false) {
-          reject(new Error((response && response.error) || "Upload failed"));
+          finish(new Error((response && response.error) || "Upload failed"));
           return;
         }
-        resolve(response);
+        finish(null, response);
       });
     } catch (emitError) {
-      clearTimeout(timer);
-      reject(emitError);
+      finish(emitError);
     }
   });
 }
 
-async function sendMediaToServer(file, fileData, thumbnail, replyTo) {
+async function sendMediaToServer(file, fileData, replyTo, onProgress) {
   const bytes = fileData instanceof ArrayBuffer
     ? new Uint8Array(fileData)
     : new Uint8Array(fileData);
@@ -872,6 +1353,10 @@ async function sendMediaToServer(file, fileData, thumbnail, replyTo) {
 
   try {
     for (let index = 0; index < totalChunks; index += 1) {
+      if (!socket.connected) {
+        throw new Error("Disconnected during upload");
+      }
+
       const start = index * CHUNK_SIZE;
       const end = Math.min(start + CHUNK_SIZE, bytes.byteLength);
       const chunk = bytes.subarray(start, end);
@@ -881,23 +1366,22 @@ async function sendMediaToServer(file, fileData, thumbnail, replyTo) {
         fileName: file.name || "file",
         fileType,
         fileSize: file.size || bytes.byteLength,
-        thumbnail: index === 0 ? thumbnail : null,
         replyTo: index === 0 && replyTo ? { msgId: replyTo.msgId } : null,
         chunkIndex: index,
         totalChunks,
         chunkData: uint8ToBase64(chunk)
       });
-
       if (response.complete) {
-        return;
+        if (onProgress) onProgress(bytes.byteLength, bytes.byteLength);
+        return true;
       }
+      if (onProgress) onProgress(end, bytes.byteLength);
     }
+    return false;
   } catch (error) {
     console.error("Upload failed:", file.name, error);
-    const message = error && error.message ? String(error.message) : "unknown error";
-    if (/timed out|network|disconnected|Upload failed$/i.test(message)) {
-      addSystemMessage(`>>> ${GENERIC_ERROR_MESSAGE}`);
-    }
+    addSystemMessage(`>>> ${GENERIC_ERROR_MESSAGE}`);
+    return false;
   }
 }
 
@@ -915,6 +1399,40 @@ socket.on("chatMessage", (data) => {
     addTextMessage(data);
   }
 });
+
+function findMessageElement(msgId) {
+  if (!msgId) return null;
+  const entry = messageRegistry.get(msgId);
+  if (entry?.el && entry.el.isConnected) return entry.el;
+  const safeId = String(msgId).replace(/["\\]/g, "");
+  return messagesList.querySelector(`[data-msg-id="${safeId}"]`);
+}
+
+socket.on("mediaThumbnailReady", (data) => {
+  if (!data || typeof data.msgId !== "string" || typeof data.thumbnail !== "string") return;
+  const message = findMessageElement(data.msgId);
+  const image = message && message.querySelector(".media-thumbnail");
+  if (!image) return;
+
+  image.src = safeMediaURL(data.thumbnail);
+  image.classList.remove("media-thumbnail-pending");
+});
+
+socket.on("mediaThumbnailFailed", (data) => {
+  if (!data || typeof data.msgId !== "string") return;
+  const message = findMessageElement(data.msgId);
+  const image = message && message.querySelector(".media-thumbnail");
+  if (image) showFullImagePreview(image);
+});
+
+function showFullImagePreview(image) {
+  if (!image) return;
+  const fullUrl = image.dataset.fullUrl;
+  if (!fullUrl || fullUrl === '#') return;
+  image.classList.remove("media-thumbnail-pending");
+  image.dataset.fallbackTried = "true";
+  image.src = safeMediaURL(fullUrl);
+}
 
 function addTextMessage(data) {
   const messageDiv = document.createElement("div");
@@ -949,11 +1467,13 @@ function addMediaMessage(data) {
   let mediaContent = '';
   
   if (data.isImage) {
+    const thumbnailUrl = safeMediaURL(data.thumbnail || IMAGE_PLACEHOLDER);
     mediaContent = `
       <div class="media-preview">
-        <img src="${safeMediaURL(data.thumbnail || data.fileUrl)}"
+        <img src="${thumbnailUrl}"
              alt="${escapeHtml(data.fileName)}"
-             class="media-thumbnail"
+             class="media-thumbnail${data.thumbnail ? "" : " media-thumbnail-pending"}"
+             data-preview-url="${thumbnailUrl}"
              data-full-url="${safeMediaURL(data.fileUrl)}"
              draggable="false">
         <div class="media-info">
@@ -961,7 +1481,7 @@ function addMediaMessage(data) {
           <small>${fileSize}</small>
           ${data.metadataStripped ? '<div class="file-warning"><i class="fas fa-check-circle"></i> METADATA REMOVED</div>' : ''}
           <a href="${safeMediaURL(data.fileUrl)}" target="_blank" class="view-link">🔍 View Full</a>
-          <a href="${safeMediaURL(data.fileUrl)}" download="${escapeHtml(data.fileName)}" class="download-link">⬇ Download</a>
+          <a href="${downloadableMediaURL(data.fileUrl)}" download="${escapeHtml(data.fileName)}" class="download-link">⬇ Download</a>
         </div>
       </div>
     `;
@@ -976,7 +1496,7 @@ function addMediaMessage(data) {
           <strong>🎥 ${escapeHtml(data.fileName)}</strong>
           <small>${fileSize}</small>
           ${data.metadataStripped ? '<div class="file-warning"><i class="fas fa-check-circle"></i> METADATA REMOVED</div>' : ''}
-          <a href="${safeMediaURL(data.fileUrl)}" download="${escapeHtml(data.fileName)}" class="download-link">⬇ Download</a>
+          <a href="${downloadableMediaURL(data.fileUrl)}" download="${escapeHtml(data.fileName)}" class="download-link">⬇ Download</a>
         </div>
       </div>
     `;
@@ -987,7 +1507,7 @@ function addMediaMessage(data) {
         <div class="media-info">
           <strong>${getFileEmoji(data.fileType, data.fileName)} ${escapeHtml(data.fileName)}</strong>
           <small>${fileSize}${data.fileType ? ` • ${escapeHtml(data.fileType)}` : ''}</small>
-          <a href="${safeMediaURL(data.fileUrl)}" download="${escapeHtml(data.fileName)}" class="download-link">⬇ Download</a>
+          <a href="${downloadableMediaURL(data.fileUrl)}" download="${escapeHtml(data.fileName)}" class="download-link">⬇ Download</a>
         </div>
       </div>
     `;
@@ -1006,9 +1526,30 @@ function addMediaMessage(data) {
   messagesList.appendChild(messageDiv);
   const zoomableMedia = messageDiv.querySelector(".media-thumbnail");
   if (zoomableMedia) {
+    zoomableMedia.addEventListener("error", () => {
+      if (zoomableMedia.dataset.fallbackTried === "true") {
+        zoomableMedia.alt = "Image preview could not be loaded";
+        return;
+      }
+      showFullImagePreview(zoomableMedia);
+    });
     zoomableMedia.addEventListener("click", (event) => {
       event.stopPropagation();
-      openFullImage(zoomableMedia.dataset.fullUrl);
+      openFullImage(safeMediaURL(data.fileUrl), data.fileName);
+    });
+  }
+  const viewFullLink = messageDiv.querySelector(".view-link");
+  if (viewFullLink) {
+    viewFullLink.addEventListener("click", (event) => {
+      event.preventDefault();
+      openFullImage(safeMediaURL(data.fileUrl), data.fileName);
+    });
+  }
+  const downloadLink = messageDiv.querySelector(".download-link");
+  if (downloadLink) {
+    downloadLink.addEventListener("click", (event) => {
+      event.preventDefault();
+      downloadMediaFile(data.fileUrl, data.fileName);
     });
   }
 
@@ -1033,6 +1574,9 @@ function addP2PMessage(data) {
   const fileSize = formatFileSize(data.fileSize);
   const fileId = escapeHtml(String(data.fileId || ""));
   const isOwnOffer = pendingP2PFiles.has(data.fileId);
+  const p2pImageMetadataNotice = typeof data.fileType === "string" && data.fileType.toLowerCase().startsWith("image/")
+    ? '<div class="file-warning">IMAGE METADATA IS NOT REMOVED FOR P2P FILES</div>'
+    : "";
 
   const actionHtml = isOwnOffer
     ? `<span class="p2p-status">Ready to send, stay online for the download</span>`
@@ -1050,6 +1594,7 @@ function addP2PMessage(data) {
       <div class="media-info">
         <strong>🔗 ${escapeHtml(data.fileName)}</strong>
         <small>${fileSize} • Serverless P2P, no size limit</small>
+        ${p2pImageMetadataNotice}
         <div class="p2p-progress-row" data-file-id="${fileId}" style="display:none;">
           <div class="p2p-progress-bar"><div class="p2p-progress-fill"></div></div>
           <span class="p2p-progress-label">0%</span>
@@ -1148,7 +1693,7 @@ function requestP2PDownload(fileId, senderSocketId, btnEl) {
     btnEl.classList.add("p2p-cancel-btn");
   }
 
-  console.log("[P2P receiver] creating RTCPeerConnection with ICE_SERVERS:", JSON.stringify(ICE_SERVERS));
+  console.log("[P2P receiver] creating RTCPeerConnection");
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
   const state = {
     pc,
@@ -1162,7 +1707,8 @@ function requestP2PDownload(fileId, senderSocketId, btnEl) {
     fileName: "file",
     fileType: "application/octet-stream",
     btnEl,
-    completed: false
+    completed: false,
+    pendingIceCandidates: []
   };
   p2pReceiverState.set(fileId, state);
 
@@ -1187,7 +1733,7 @@ function requestP2PDownload(fileId, senderSocketId, btnEl) {
 
   pc.onicecandidate = (event) => {
     if (event.candidate) {
-      console.log(`[P2P receiver] local candidate type=${candidateType(event.candidate.candidate)}:`, event.candidate.candidate);
+      console.log(`[P2P receiver] local candidate type=${candidateType(event.candidate.candidate)}`);
       socket.emit("p2pSignal", { to: senderSocketId, data: { type: "ice-candidate", fileId, candidate: event.candidate } });
     } else {
       console.log("[P2P receiver] ICE gathering complete");
@@ -1299,7 +1845,18 @@ async function sendFileOverP2PChannel(channel, file) {
 
     if (channel.bufferedAmount > P2P_BUFFERED_AMOUNT_HIGH) {
       await new Promise((resolve) => {
-        channel.onbufferedamountlow = () => resolve();
+        const resume = () => {
+          channel.removeEventListener("bufferedamountlow", resume);
+          channel.removeEventListener("close", resume);
+          channel.removeEventListener("error", resume);
+          resolve();
+        };
+        channel.addEventListener("bufferedamountlow", resume, { once: true });
+        channel.addEventListener("close", resume, { once: true });
+        channel.addEventListener("error", resume, { once: true });
+        if (channel.readyState !== "open" || channel.bufferedAmount <= P2P_BUFFERED_AMOUNT_HIGH / 2) {
+          resume();
+        }
       });
       if (channel.readyState !== "open") return;
     }
@@ -1341,13 +1898,14 @@ async function handleP2POffer(fromSocketId, data) {
   const key = senderKey(fromSocketId, data.fileId);
   closeP2PSenderConnection(key);
 
-  console.log("[P2P sender] creating RTCPeerConnection with ICE_SERVERS:", JSON.stringify(ICE_SERVERS));
+  console.log("[P2P sender] creating RTCPeerConnection");
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-  p2pSenderConnections.set(key, { pc, channel: null, fileId: data.fileId });
+  const senderState = { pc, channel: null, fileId: data.fileId, pendingIceCandidates: [] };
+  p2pSenderConnections.set(key, senderState);
 
   pc.onicecandidate = (event) => {
     if (event.candidate) {
-      console.log(`[P2P sender] local candidate type=${candidateType(event.candidate.candidate)}:`, event.candidate.candidate);
+      console.log(`[P2P sender] local candidate type=${candidateType(event.candidate.candidate)}`);
       socket.emit("p2pSignal", { to: fromSocketId, data: { type: "ice-candidate", fileId: data.fileId, candidate: event.candidate } });
     } else {
       console.log("[P2P sender] ICE gathering complete");
@@ -1392,6 +1950,13 @@ async function handleP2POffer(fromSocketId, data) {
   };
 
   await pc.setRemoteDescription(data.sdp);
+  for (const candidate of senderState.pendingIceCandidates.splice(0)) {
+    try {
+      await pc.addIceCandidate(candidate);
+    } catch (error) {
+      console.error("P2P addIceCandidate error:", error);
+    }
+  }
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
   socket.emit("p2pSignal", { to: fromSocketId, data: { type: "answer", fileId: data.fileId, sdp: pc.localDescription } });
@@ -1404,17 +1969,31 @@ socket.on("p2pSignal", async ({ from, data } = {}) => {
       await handleP2POffer(from, data);
     } else if (data.type === "answer") {
       const state = p2pReceiverState.get(data.fileId);
-      if (state) await state.pc.setRemoteDescription(data.sdp);
+      if (state) {
+        await state.pc.setRemoteDescription(data.sdp);
+        for (const candidate of state.pendingIceCandidates.splice(0)) {
+          try {
+            await state.pc.addIceCandidate(candidate);
+          } catch (error) {
+            console.error("P2P addIceCandidate error:", error);
+          }
+        }
+      }
     } else if (data.type === "ice-candidate" && data.candidate) {
       const senderEntry = p2pSenderConnections.get(senderKey(from, data.fileId));
       const receiverState = p2pReceiverState.get(data.fileId);
       const pc = (senderEntry ? senderEntry.pc : null) || (receiverState ? receiverState.pc : null);
       if (pc) {
-        console.log(`[P2P] remote candidate type=${candidateType(data.candidate.candidate)}:`, data.candidate.candidate);
-        try {
+        console.log(`[P2P] remote candidate type=${candidateType(data.candidate.candidate)}`);
+        const state = senderEntry || receiverState;
+        if (!pc.remoteDescription) {
+          if (state.pendingIceCandidates.length >= 64) {
+            console.warn("P2P candidate queue limit reached.");
+            return;
+          }
+          state.pendingIceCandidates.push(data.candidate);
+        } else {
           await pc.addIceCandidate(data.candidate);
-        } catch (error) {
-          console.error("P2P addIceCandidate error:", error);
         }
       }
     }
@@ -1482,9 +2061,12 @@ function addSystemMessage(text) {
 }
 
 function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
+  return String(text ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function normalizeLinkHref(rawUrl) {
@@ -1607,64 +2189,77 @@ function processDroppedFiles(files) {
         return;
     }
     
-    if (validFiles.length > 5) {
+    if (validFiles.length > MAX_DROPPED_FILES) {
+        addSystemMessage(`>>> You can upload at most ${MAX_DROPPED_FILES} files at a time`);
+        return;
     }
     
-    validFiles.forEach((file, index) => {
-        setTimeout(() => {
-            uploadMedia(file);
-        }, index * 300); 
-    });
+    void (async () => {
+        for (const file of validFiles) {
+            if (!await uploadMedia(file)) break;
+        }
+    })();
 }
 
 
-function uploadMedia(file) {
-    if (!file) return;
+async function uploadMedia(file) {
+    if (!file) return false;
 
     if (file.size > MAX_UPLOAD_SIZE) {
-        alert("File is too large (max 50MB)");
-        return;
+        addSystemMessage(">>> File is too large (max 50MB)");
+        return false;
     }
 
     if (file.size === 0) {
         console.error("Upload failed: empty file", file.name);
         addSystemMessage(`>>> ${GENERIC_ERROR_MESSAGE}`);
-        return;
+        return false;
     }
 
-    addUploadNotification(file);
+    if (mediaUploadInProgress) {
+        addSystemMessage(">>> Wait for the current upload to finish before sending another file");
+        return false;
+    }
+
+    if (!socket.connected) {
+        addSystemMessage(">>> Reconnect before uploading a file");
+        return false;
+    }
+
+    mediaUploadInProgress = true;
+    const notification = addUploadNotification(file);
 
     const replyTo = replyingTo;
     cancelReply();
 
-    const reader = new FileReader();
-
-    reader.onload = function(e) {
-        buildThumbnailAndSend(file, e.target.result, replyTo);
-    };
-
-    reader.onerror = (error) => {
+    try {
+        const fileData = await file.arrayBuffer();
+        return await sendMediaToServer(file, fileData, replyTo, (sent, total) => {
+            notification.querySelector("span").textContent =
+                `Uploading ${file.name}... ${Math.round((sent / total) * 100)}%`;
+        });
+    } catch (error) {
         console.error("File read error:", file.name, error);
         addSystemMessage(`>>> ${GENERIC_ERROR_MESSAGE}`);
-    };
-
-    reader.readAsArrayBuffer(file);
+        return false;
+    } finally {
+        notification.remove();
+        mediaUploadInProgress = false;
+    }
 }
 
 function addUploadNotification(file) {
     const notification = document.createElement('div');
     notification.className = 'upload-notification';
-    notification.innerHTML = `
-        <i class="fas fa-spinner fa-spin"></i>
-        <span>Uploading ${file.name}...</span>
-    `;
+    const spinner = document.createElement("i");
+    spinner.className = "fas fa-spinner fa-spin";
+    spinner.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.textContent = `Preparing ${file.name}...`;
+    notification.append(spinner, label);
     
     document.querySelector('.messages-container').appendChild(notification);
-    setTimeout(() => {
-        if (notification.parentNode) {
-            notification.parentNode.removeChild(notification);
-        }
-    }, 3000);
+    return notification;
 }
 
 function resetVoiceStateUI() {
@@ -2696,88 +3291,177 @@ function handleEscapeKey(e) {
     }
 }
 
-window.openFullImage = function(url) {
+window.openFullImage = function(url, fileName) {
+    if (!url || url === '#' || url === IMAGE_PLACEHOLDER) return;
     closeFullImageModal();
 
     const modal = document.createElement('div');
     modal.className = 'image-modal';
-    modal.style.cssText = `
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background: rgba(0,0,0,0.95);
-        z-index: 9999;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-    `;
-    
+    document.body.classList.add('image-modal-open');
+
     const img = document.createElement('img');
-    img.src = url;
     img.draggable = false;
-    img.style.cssText = `
-        max-width: 90%;
-        max-height: 90%;
-        object-fit: contain;
-        border: 2px solid var(--neon-blue);
-        border-radius: 10px;
-    `;
+    img.alt = fileName ? `Image: ${fileName}` : "Full-size image";
+    img.style.visibility = "hidden";
     applyPreviewZoom(img, 1);
+
+    const loadingLabel = document.createElement("div");
+    loadingLabel.className = "image-modal-loading-label";
+    loadingLabel.textContent = "Loading full image…";
+    modal.classList.add("image-modal-loading");
+
+    const onImageLoaded = () => {
+        if (window.currentImageModal !== modal) return;
+        modal.classList.remove("image-modal-loading");
+        img.style.visibility = "visible";
+    };
+
+    img.onload = onImageLoaded;
+    img.onerror = () => {
+        if (window.currentImageModal !== modal) return;
+        modal.classList.remove("image-modal-loading");
+        loadingLabel.textContent = "Full image could not be loaded";
+        loadingLabel.classList.add("image-modal-load-error");
+    };
+
+    let currentZoom = 1;
+    let panX = 0;
+    let panY = 0;
+    let isPanning = false;
+    let startX = 0;
+    let startY = 0;
+    let initialPinchDistance = 0;
+    let initialZoom = 1;
+
+    const updateTransform = () => {
+        img.dataset.zoom = String(currentZoom);
+        if (currentZoom <= 1) {
+            panX = 0;
+            panY = 0;
+            img.style.transform = "scale(1)";
+        } else {
+            img.style.transform = `translate(${panX}px, ${panY}px) scale(${currentZoom})`;
+        }
+    };
 
     img.addEventListener("wheel", (event) => {
         event.preventDefault();
-        setZoomOriginFromPointer(img, event.clientX, event.clientY);
-        const currentZoom = Number(img.dataset.zoom || 1);
-        const delta = event.deltaY < 0 ? 0.16 : -0.16;
-        applyPreviewZoom(img, currentZoom + delta);
+        const delta = event.deltaY < 0 ? 0.2 : -0.2;
+        currentZoom = clampZoomLevel(currentZoom + delta);
+        updateTransform();
     }, { passive: false });
 
+    let lastTapTime = 0;
     img.addEventListener("dblclick", (event) => {
         event.preventDefault();
-        applyPreviewZoom(img, 1);
+        currentZoom = currentZoom > 1 ? 1 : 2.5;
+        updateTransform();
     });
-    
+
+    img.addEventListener("touchstart", (e) => {
+        if (e.touches.length === 1) {
+            const now = Date.now();
+            if (now - lastTapTime < 300) {
+                e.preventDefault();
+                currentZoom = currentZoom > 1 ? 1 : 2.5;
+                updateTransform();
+                lastTapTime = 0;
+                return;
+            }
+            lastTapTime = now;
+
+            isPanning = true;
+            startX = e.touches[0].clientX - panX;
+            startY = e.touches[0].clientY - panY;
+        } else if (e.touches.length === 2) {
+            isPanning = false;
+            const dx = e.touches[0].clientX - e.touches[1].clientX;
+            const dy = e.touches[0].clientY - e.touches[1].clientY;
+            initialPinchDistance = Math.hypot(dx, dy);
+            initialZoom = currentZoom;
+        }
+    }, { passive: false });
+
+    img.addEventListener("touchmove", (e) => {
+        if (e.touches.length === 1 && isPanning) {
+            if (currentZoom > 1) {
+                e.preventDefault();
+                panX = e.touches[0].clientX - startX;
+                panY = e.touches[0].clientY - startY;
+                updateTransform();
+            }
+        } else if (e.touches.length === 2 && initialPinchDistance > 0) {
+            e.preventDefault();
+            const dx = e.touches[0].clientX - e.touches[1].clientX;
+            const dy = e.touches[0].clientY - e.touches[1].clientY;
+            const currentDistance = Math.hypot(dx, dy);
+            const scale = currentDistance / initialPinchDistance;
+            currentZoom = clampZoomLevel(initialZoom * scale);
+            updateTransform();
+        }
+    }, { passive: false });
+
+    img.addEventListener("touchend", (e) => {
+        if (e.touches.length === 0) {
+            isPanning = false;
+            initialPinchDistance = 0;
+        }
+    });
+
+    const actions = document.createElement('div');
+    actions.className = 'image-modal-actions';
+
+    const downloadBtn = document.createElement('button');
+    downloadBtn.type = 'button';
+    downloadBtn.className = 'modal-download-btn';
+    downloadBtn.innerHTML = '<i class="fas fa-arrow-down" aria-hidden="true"></i>';
+    downloadBtn.title = 'Download image';
+    downloadBtn.setAttribute('aria-label', 'Download image');
+    downloadBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        downloadMediaFile(url, fileName);
+    });
+
     const closeBtn = document.createElement('button');
-    closeBtn.innerHTML = '✕';
+    closeBtn.type = 'button';
     closeBtn.className = 'modal-close-btn';
-    closeBtn.style.cssText = `
-        position: absolute;
-        top: 20px;
-        right: 20px;
-        background: var(--neon-red);
-        color: white;
-        border: none;
-        border-radius: 50%;
-        width: 40px;
-        height: 40px;
-        font-size: 20px;
-        cursor: pointer;
-        z-index: 10000;
-    `;
-    
-    closeBtn.addEventListener('click', closeFullImageModal);
-    
+    closeBtn.innerHTML = '&times;';
+    closeBtn.title = 'Close preview';
+    closeBtn.setAttribute('aria-label', 'Close preview');
+    closeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeFullImageModal();
+    });
+
+    actions.appendChild(downloadBtn);
+    actions.appendChild(closeBtn);
+
     modal.appendChild(img);
-    modal.appendChild(closeBtn);
+    modal.appendChild(actions);
+    modal.appendChild(loadingLabel);
     document.body.appendChild(modal);
-    
+
     modal.addEventListener('click', (e) => {
         if (e.target === modal) {
             closeFullImageModal();
         }
     });
-    
+
     window.currentImageModal = modal;
-}
+    img.src = url;
+
+    if (img.complete && img.naturalWidth > 0) {
+        onImageLoaded();
+    }
+};
 
 function closeFullImageModal() {
     const modal = window.currentImageModal || document.querySelector('.image-modal');
     if (modal) {
-        document.body.removeChild(modal);
+        modal.remove();
         window.currentImageModal = null;
     }
+    document.body.classList.remove('image-modal-open');
 }
 
 function hideDragIndicator() {
@@ -2865,7 +3549,7 @@ messagesList.addEventListener("click", (e) => {
     ".media-thumbnail, .view-link, .download-link, video, a, button, input, textarea"
   );
 
-  const messageContent = e.target.closest(".message-content, .media-info, .message-header");
+  const messageContent = e.target.closest(".message-content, .media-info, .media-preview, .message-header");
 
   if (interactiveTarget) return;
   if (messageContent) return;
