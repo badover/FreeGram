@@ -1369,7 +1369,7 @@ async function sendMediaToServer(file, fileData, replyTo, onProgress) {
         replyTo: index === 0 && replyTo ? { msgId: replyTo.msgId } : null,
         chunkIndex: index,
         totalChunks,
-        chunkData: uint8ToBase64(chunk)
+        chunkData: chunk
       });
       if (response.complete) {
         if (onProgress) onProgress(bytes.byteLength, bytes.byteLength);
@@ -3464,6 +3464,25 @@ function closeFullImageModal() {
     document.body.classList.remove('image-modal-open');
 }
 
+// Убрана превью-логика — drag сразу отправляет при отпускании
+
+function showDragIndicator() {
+    let indicator = document.getElementById('globalDragIndicator');
+    if (!indicator) {
+        indicator = document.createElement('div');
+        indicator.id = 'globalDragIndicator';
+        document.body.appendChild(indicator);
+    }
+    indicator.innerHTML = `
+        <div class="drag-indicator-content">
+            <i class="fas fa-cloud-upload-alt"></i>
+            <h3>DROP TO UPLOAD</h3>
+            <p>Release to upload files to chat</p>
+        </div>
+    `;
+    indicator.style.display = 'flex';
+}
+
 function hideDragIndicator() {
     const indicator = document.getElementById('globalDragIndicator');
     if (indicator) {
@@ -3475,14 +3494,25 @@ function hideDragIndicator() {
 let isDragging = false;
 
 function handleDragOver(e) {
+    // Показываем оверлей только если: мы в чате И тащим именно файлы
+    const hasFiles = e.dataTransfer.types && (
+        e.dataTransfer.types.includes('Files') ||
+        e.dataTransfer.types.indexOf('Files') !== -1
+    );
+    const inChat = chatScreen.style.display === 'block';
+
+    if (!hasFiles || !inChat) {
+        return;
+    }
+
     e.preventDefault();
     e.stopPropagation();
-    
+
     if (!isDragging) {
         isDragging = true;
         showDragIndicator();
     }
-    
+
     e.dataTransfer.dropEffect = 'copy';
     document.body.style.cursor = 'copy';
 }
@@ -3490,7 +3520,7 @@ function handleDragOver(e) {
 function handleDragLeave(e) {
     e.preventDefault();
     e.stopPropagation();
-    
+
     if (e.target === document || e.target === document.documentElement) {
         isDragging = false;
         hideDragIndicator();
@@ -3501,13 +3531,13 @@ function handleDragLeave(e) {
 function handleGlobalDrop(e) {
     e.preventDefault();
     e.stopPropagation();
-    
+
     isDragging = false;
     hideDragIndicator();
     document.body.style.cursor = '';
-    
+
     const files = e.dataTransfer.files;
-    
+
     if (files.length > 0 && chatScreen.style.display === 'block') {
         processDroppedFiles(files);
     }

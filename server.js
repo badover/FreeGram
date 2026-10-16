@@ -476,7 +476,7 @@ async function optimizeUploadBuffer(buffer, fileType, fileName) {
   if (isAnimatedGif) {
     try {
       finalBuffer = await sharp(finalBuffer, { animated: true })
-        .gif({ effort: 7 })
+        .gif({ effort: 2 })
         .toBuffer();
       metadataStripped = true;
     } catch (validateError) {
@@ -496,13 +496,13 @@ async function optimizeUploadBuffer(buffer, fileType, fileName) {
       }
 
       if (finalType === "image/png") {
-        finalBuffer = await pipeline.png({ compressionLevel: 8 }).toBuffer();
+        finalBuffer = await pipeline.png({ compressionLevel: 5, fastDeflate: true }).toBuffer();
         finalType = "image/png";
       } else if (finalType === "image/webp") {
-        finalBuffer = await pipeline.webp({ quality: 80 }).toBuffer();
+        finalBuffer = await pipeline.webp({ quality: 80, effort: 3 }).toBuffer();
         finalType = "image/webp";
       } else {
-        finalBuffer = await pipeline.jpeg({ quality: 78, progressive: true }).toBuffer();
+        finalBuffer = await pipeline.jpeg({ quality: 80, mozjpeg: false }).toBuffer();
         finalType = "image/jpeg";
       }
       metadataStripped = true;
@@ -567,6 +567,20 @@ async function saveUploadedMedia(socket, payload) {
     const displayName = sanitizedFileName.substring(0, 100);
     const msgId = generateMessageId();
 
+    let initialThumbnail = null;
+    if (inlinePreview && isImage) {
+      try {
+        const thumbnailBuffer = await sharp(finalBuffer)
+          .rotate()
+          .resize({ width: 320, height: 320, fit: "inside", withoutEnlargement: true })
+          .jpeg({ quality: 75, progressive: false })
+          .toBuffer();
+        initialThumbnail = `data:image/jpeg;base64,${thumbnailBuffer.toString("base64")}`;
+      } catch (thumbErr) {
+        console.error("Fast thumbnail generation failed:", thumbErr.message);
+      }
+    }
+
     const mediaMsg = {
       type: "media",
       msgId,
@@ -574,7 +588,7 @@ async function saveUploadedMedia(socket, payload) {
       fileUrl: `/uploads/${uniqueName}`,
       fileType: finalType,
       fileSize: finalBuffer.length,
-      thumbnail: null,
+      thumbnail: initialThumbnail,
       isImage,
       isVideo,
       isGenericFile: !(isImage || isVideo),
@@ -590,25 +604,6 @@ async function saveUploadedMedia(socket, payload) {
 
     socket.to(roomName).emit("chatMessage", mediaMsg);
     socket.emit("chatMessage", { ...mediaMsg, self: true });
-
-    if (inlinePreview && isImage) {
-      setImmediate(async () => {
-        try {
-          const thumbnailBuffer = await sharp(finalBuffer)
-            .rotate()
-            .resize({ width: 320, height: 320, fit: "inside", withoutEnlargement: true })
-            .jpeg({ quality: 70, progressive: true })
-            .toBuffer();
-          io.to(roomName).emit("mediaThumbnailReady", {
-            msgId,
-            thumbnail: `data:image/jpeg;base64,${thumbnailBuffer.toString("base64")}`
-          });
-        } catch (thumbnailError) {
-          console.error("Image thumbnail generation failed:", thumbnailError.message);
-          io.to(roomName).emit("mediaThumbnailFailed", { msgId });
-        }
-      });
-    }
 
     return true;
   } catch (error) {
