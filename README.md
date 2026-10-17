@@ -29,6 +29,7 @@
 
 The server does not log any information about users or their activity.
 FreeGram does not use any database, which means message history is never stored.
+Made with the use of AI.
 
 ---
 
