@@ -3464,8 +3464,6 @@ function closeFullImageModal() {
     document.body.classList.remove('image-modal-open');
 }
 
-// Убрана превью-логика — drag сразу отправляет при отпускании
-
 function showDragIndicator() {
     let indicator = document.getElementById('globalDragIndicator');
     if (!indicator) {
@@ -3494,7 +3492,6 @@ function hideDragIndicator() {
 let isDragging = false;
 
 function handleDragOver(e) {
-    // Показываем оверлей только если: мы в чате И тащим именно файлы
     const hasFiles = e.dataTransfer.types && (
         e.dataTransfer.types.includes('Files') ||
         e.dataTransfer.types.indexOf('Files') !== -1

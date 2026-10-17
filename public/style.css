@@ -1651,7 +1651,6 @@ body.image-modal-open {
     font-family: 'Share Tech Mono', 'Jura', monospace;
 }
 
-/* Превью изображения при drag-and-drop */
 .drag-preview-wrap {
     position: relative;
     display: inline-block;
