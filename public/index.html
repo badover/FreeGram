@@ -339,6 +339,18 @@
 
   <div id="cyberToastContainer" class="cyber-toast-container" aria-live="polite"></div>
 
+  <div id="windowControls" class="window-controls" style="display:none;">
+    <button type="button" class="win-control-btn win-minimize-btn" id="winMinimizeBtn" title="Свернуть" aria-label="Minimize">
+      <i class="fas fa-minus" aria-hidden="true"></i>
+    </button>
+    <button type="button" class="win-control-btn win-maximize-btn" id="winMaximizeBtn" title="Развернуть" aria-label="Maximize">
+      <i class="far fa-square" aria-hidden="true"></i>
+    </button>
+    <button type="button" class="win-control-btn win-close-btn" id="winCloseBtn" title="Закрыть" aria-label="Close">
+      <i class="fas fa-xmark" aria-hidden="true"></i>
+    </button>
+  </div>
+
   <script src="/socket.io/socket.io.js"></script>
   <script src="/client.js"></script>
 </body>

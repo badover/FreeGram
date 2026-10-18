@@ -1583,7 +1583,6 @@ socket.on("roomJoined", async (data) => {
     if (currentNickname) localStorage.setItem("freegram_nickname", currentNickname);
   } catch (_) {}
 
-  // Setup E2EE key from invite key or persisted storage
   if (!activeRoomKey && pendingInviteKey) {
     try {
       activeRoomKey = await importKeyFromBase64(pendingInviteKey);
@@ -4352,3 +4351,29 @@ document.addEventListener("click", (event) => {
   closeVoiceContextMenu();
 });
 window.addEventListener("resize", updateTypingIndicatorPosition);
+
+function initWindowControls() {
+  if (!window.electronAPI) return;
+  document.body.classList.add("is-electron");
+  const winControls = document.getElementById("windowControls");
+  if (winControls) winControls.style.display = "flex";
+
+  const winMin = document.getElementById("winMinimizeBtn");
+  const winMax = document.getElementById("winMaximizeBtn");
+  const winClose = document.getElementById("winCloseBtn");
+
+  if (winMin && !winMin.dataset.bound) {
+    winMin.dataset.bound = "true";
+    winMin.addEventListener("click", () => window.electronAPI.minimize());
+  }
+  if (winMax && !winMax.dataset.bound) {
+    winMax.dataset.bound = "true";
+    winMax.addEventListener("click", () => window.electronAPI.maximize());
+  }
+  if (winClose && !winClose.dataset.bound) {
+    winClose.dataset.bound = "true";
+    winClose.addEventListener("click", () => window.electronAPI.close());
+  }
+}
+initWindowControls();
+document.addEventListener("DOMContentLoaded", initWindowControls);

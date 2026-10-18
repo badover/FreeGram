@@ -3504,3 +3504,63 @@ body[data-rounded-buttons="true"] button {
     grid-template-columns: 1fr;
   }
 }
+
+.window-controls {
+  position: fixed;
+  top: 10px;
+  right: 14px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  z-index: 10000;
+  -webkit-app-region: no-drag;
+}
+
+.win-control-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  border: 1px solid rgba(0, 243, 255, 0.3);
+  background: rgba(5, 5, 15, 0.85);
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.2s ease;
+  backdrop-filter: blur(8px);
+}
+
+.win-control-btn:hover {
+  transform: translateY(-1px);
+}
+
+.win-minimize-btn:hover {
+  color: var(--neon-blue);
+  border-color: var(--neon-blue);
+  box-shadow: 0 0 10px rgba(0, 243, 255, 0.4);
+}
+
+.win-maximize-btn:hover {
+  color: var(--neon-green);
+  border-color: var(--neon-green);
+  box-shadow: 0 0 10px rgba(0, 255, 136, 0.4);
+}
+
+.win-close-btn:hover {
+  color: #fff;
+  background: var(--neon-red);
+  border-color: var(--neon-red);
+  box-shadow: 0 0 12px rgba(255, 0, 85, 0.6);
+}
+
+body.is-electron .chat-header {
+  padding-right: 140px;
+}
+
+body.is-electron .site-menu {
+  top: 10px;
+  right: 140px;
+}
+
