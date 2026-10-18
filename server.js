@@ -61,7 +61,7 @@ const MAX_FILE_UPLOADS_PERIOD = 30 * 1000;
 const MAX_JOIN_ATTEMPTS = 20;
 const MAX_JOIN_ATTEMPTS_PERIOD = 60 * 1000;
 const MAX_PENDING_UPLOAD_AGE_MS = 2 * 60 * 1000;
-const RECONNECT_GRACE_PERIOD_MS = 5 * 60 * 1000;
+const RECONNECT_GRACE_PERIOD_MS = 4 * 1000;
 
 const SERVER_HOST = process.env.HOST || "127.0.0.1";
 const TURN_URL = process.env.TURN_URL || "";
@@ -1496,13 +1496,14 @@ io.on("connection", (socket) => {
       .filter((key) => key.startsWith(`${socket.id}:`))
       .forEach((key) => cleanupPendingUpload(key));
     
-    if (socket.room && rooms[socket.room]) {
+    const targetRoom = socket.room || socket.data?.room;
+    if (targetRoom && rooms[targetRoom]) {
       leaveVoice(socket);
-      const userData = rooms[socket.room].users[socket.id];
+      const userData = rooms[targetRoom].users[socket.id];
       
       if (userData) {
-        const roomName = socket.room;
-        const nickname = userData.nickname || socket.nickname || "Anonymous";
+        const roomName = targetRoom;
+        const nickname = userData.nickname || socket.nickname || socket.data?.nickname || "Anonymous";
         clearDisconnectGraceTimer(socket.id);
         const timer = setTimeout(() => {
           disconnectGraceTimers.delete(socket.id);
