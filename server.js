@@ -1188,10 +1188,22 @@ io.on("connection", (socket) => {
     const membership = getSocketRoom(socket);
     if (!membership) return;
     const { roomName, roomData } = membership;
-    if (!payload || typeof payload !== "object" || typeof payload.msg !== "string") return;
+    if (!payload || typeof payload !== "object") return;
 
-    const msg = payload.msg.trim();
-    if (!msg || msg.length > MAX_MSG_LEN) return;
+    const isEncrypted = payload.enc === true &&
+      typeof payload.iv === "string" &&
+      typeof payload.ct === "string" &&
+      payload.iv.length >= 10 && payload.iv.length <= 64 &&
+      payload.ct.length >= 1 && payload.ct.length <= MAX_MSG_LEN * 8;
+
+    let msg = "";
+    if (isEncrypted) {
+      msg = "[🔒 Encrypted message]";
+    } else {
+      if (typeof payload.msg !== "string") return;
+      msg = payload.msg.trim();
+      if (!msg || msg.length > MAX_MSG_LEN) return;
+    }
 
     const replyTo = resolveReplyTo(roomData, payload.replyTo);
     const msgId = generateMessageId();
@@ -1204,6 +1216,12 @@ io.on("connection", (socket) => {
       self: false,
       replyTo
     };
+
+    if (isEncrypted) {
+      messageData.enc = true;
+      messageData.iv = payload.iv;
+      messageData.ct = payload.ct;
+    }
 
     cacheMessageForReply(roomData, msgId, socket.nickname, msg.slice(0, 120), "text");
 

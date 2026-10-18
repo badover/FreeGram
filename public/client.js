@@ -59,6 +59,204 @@ const joinInviteBtn = document.getElementById("joinInviteBtn");
 const inviteCancelRow = document.getElementById("inviteCancelRow");
 const inviteCancelBtn = document.getElementById("inviteCancelBtn");
 
+function bufferToBase64Url(buffer) {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  let binary = "";
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+function base64UrlToBuffer(base64Url) {
+  let str = String(base64Url || "").replace(/-/g, "+").replace(/_/g, "/");
+  while (str.length % 4) {
+    str += "=";
+  }
+  const binary = atob(str);
+  const len = binary.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function isWebCryptoAvailable() {
+  return typeof window !== "undefined" &&
+    window.crypto &&
+    Boolean(window.crypto.subtle);
+}
+
+async function deriveE2EEKey(roomName, password) {
+  if (!isWebCryptoAvailable()) {
+    console.warn("Web Crypto API is unavailable in this environment (requires HTTPS or localhost).");
+    return null;
+  }
+  try {
+    const enc = new TextEncoder();
+    const cleanRoom = String(roomName || "").trim().toLowerCase();
+    const salt = enc.encode("freegram-e2ee-v1:" + cleanRoom);
+    const passBytes = enc.encode(String(password || ""));
+
+    const baseKey = await window.crypto.subtle.importKey(
+      "raw",
+      passBytes,
+      { name: "PBKDF2" },
+      false,
+      ["deriveKey"]
+    );
+
+    const derivedKey = await window.crypto.subtle.deriveKey(
+      {
+        name: "PBKDF2",
+        salt,
+        iterations: 100000,
+        hash: "SHA-256"
+      },
+      baseKey,
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"]
+    );
+
+    return derivedKey;
+  } catch (err) {
+    console.error("Failed to derive E2EE key:", err);
+    return null;
+  }
+}
+
+async function exportKeyToBase64(cryptoKey) {
+  if (!cryptoKey || !isWebCryptoAvailable()) return null;
+  try {
+    const rawBuffer = await window.crypto.subtle.exportKey("raw", cryptoKey);
+    return bufferToBase64Url(rawBuffer);
+  } catch (err) {
+    console.error("Failed to export E2EE key:", err);
+    return null;
+  }
+}
+
+async function importKeyFromBase64(base64UrlKey) {
+  if (!base64UrlKey || !isWebCryptoAvailable()) return null;
+  try {
+    const keyBytes = base64UrlToBuffer(base64UrlKey);
+    if (keyBytes.byteLength !== 32) {
+      console.warn("Invalid AES-256 key length:", keyBytes.byteLength);
+      return null;
+    }
+    const importedKey = await window.crypto.subtle.importKey(
+      "raw",
+      keyBytes,
+      { name: "AES-GCM" },
+      true,
+      ["encrypt", "decrypt"]
+    );
+    return importedKey;
+  } catch (err) {
+    console.error("Failed to import E2EE key:", err);
+    return null;
+  }
+}
+
+async function encryptChatMessage(payloadObj) {
+  if (!activeRoomKey || !isWebCryptoAvailable()) return null;
+  try {
+    const iv = window.crypto.getRandomValues(new Uint8Array(12));
+    const jsonStr = JSON.stringify(payloadObj);
+    const dataBytes = new TextEncoder().encode(jsonStr);
+
+    const ctBuffer = await window.crypto.subtle.encrypt(
+      { name: "AES-GCM", iv },
+      activeRoomKey,
+      dataBytes
+    );
+
+    return {
+      enc: true,
+      iv: bufferToBase64Url(iv),
+      ct: bufferToBase64Url(ctBuffer)
+    };
+  } catch (err) {
+    console.error("Encryption error:", err);
+    return null;
+  }
+}
+
+async function decryptChatMessage(ivBase64Url, ctBase64Url) {
+  if (!activeRoomKey || !isWebCryptoAvailable()) return null;
+  try {
+    const iv = base64UrlToBuffer(ivBase64Url);
+    const ct = base64UrlToBuffer(ctBase64Url);
+
+    const ptBuffer = await window.crypto.subtle.decrypt(
+      { name: "AES-GCM", iv },
+      activeRoomKey,
+      ct
+    );
+
+    const jsonStr = new TextDecoder().decode(ptBuffer);
+    return JSON.parse(jsonStr);
+  } catch (err) {
+    console.warn("Decryption error:", err);
+    return null;
+  }
+}
+
+function persistRoomKey(roomName, keyBase64) {
+  if (!roomName || !keyBase64) return;
+  try {
+    sessionStorage.setItem("freegram_e2ee_" + roomName.toLowerCase().trim(), keyBase64);
+  } catch (_) {}
+}
+
+function getPersistedRoomKey(roomName) {
+  if (!roomName) return null;
+  try {
+    return sessionStorage.getItem("freegram_e2ee_" + roomName.toLowerCase().trim());
+  } catch (_) {
+    return null;
+  }
+}
+
+function clearPersistedRoomKey(roomName) {
+  if (!roomName) return;
+  try {
+    sessionStorage.removeItem("freegram_e2ee_" + roomName.toLowerCase().trim());
+  } catch (_) {}
+}
+
+function updateE2EEUIState() {
+  const badge = document.getElementById("e2eeBadge");
+  if (!badge) return;
+  const isE2EE = Boolean(activeRoomKey);
+  if (isE2EE) {
+    badge.classList.remove("inactive");
+    badge.innerHTML = '<i class="fas fa-lock" aria-hidden="true"></i> <span class="e2ee-badge-text">E2EE</span>';
+    badge.title = "End-to-End Encrypted (AES-256-GCM)";
+  } else {
+    badge.classList.add("inactive");
+    badge.innerHTML = '<i class="fas fa-unlock" aria-hidden="true"></i> <span class="e2ee-badge-text">NO E2EE</span>';
+    badge.title = "End-to-End Encryption Disabled";
+  }
+}
+
+function getInviteKeyFromUrl() {
+  const hash = window.location.hash.replace(/^#/, "");
+  if (!hash) return null;
+  const hashParams = new URLSearchParams(hash);
+  const keyParam = hashParams.get("key") || hashParams.get("k");
+  if (keyParam && keyParam.trim()) {
+    return keyParam.trim();
+  }
+  return null;
+}
+
 function getInviteTokenFromUrl() {
   const path = window.location.pathname;
   const matchPrefixed = path.match(/^\/(?:join|i|r)\/([^\/?#]+)/i);
@@ -68,18 +266,28 @@ function getInviteTokenFromUrl() {
   if (matchDirect && !path.includes(".")) return matchDirect[1].trim();
 
   const urlParams = new URLSearchParams(window.location.search);
-  const queryInvite = urlParams.get("invite");
+  const queryInvite = urlParams.get("invite") || urlParams.get("i");
   if (queryInvite && queryInvite.trim()) return queryInvite.trim();
 
   const hash = window.location.hash.replace(/^#/, "");
-  const hashMatch = hash.match(/(?:invite=)?([a-zA-Z0-9_-]{8,64})/i);
-  if (hashMatch) return hashMatch[1].trim();
+  if (hash) {
+    const hashParams = new URLSearchParams(hash);
+    const inviteParam = hashParams.get("invite") || hashParams.get("i");
+    if (inviteParam && inviteParam.trim()) return inviteParam.trim();
+    if (!hash.includes("=") && /^[a-zA-Z0-9_-]{8,64}$/.test(hash)) {
+      return hash.trim();
+    }
+  }
 
   return null;
 }
 
 function getRoomInviteUrl(token) {
-  return `${window.location.origin}/join/${token}`;
+  let url = `${window.location.origin}/join/${token}`;
+  if (activeRoomKeyBase64) {
+    url += `#key=${activeRoomKeyBase64}`;
+  }
+  return url;
 }
 
 function showCyberToast(message, type = "success", durationMs = 2500) {
@@ -165,6 +373,9 @@ let currentRoom = "";
 let currentNickname = "";
 let currentInviteToken = null;
 let pendingInviteToken = getInviteTokenFromUrl();
+let pendingInviteKey = getInviteKeyFromUrl();
+let activeRoomKey = null;
+let activeRoomKeyBase64 = null;
 let fileAccessToken = null;
 let loginRequestPending = false;
 let typingUsers = new Map();
@@ -631,7 +842,7 @@ function normalizeOutgoingMessage(value) {
 
 
 if (createRoomBtn) {
-  createRoomBtn.addEventListener("click", () => {
+  createRoomBtn.addEventListener("click", async () => {
     const room = roomInput.value.trim();
     const password = passwordInput.value;
     const nickname = nicknameInput.value.trim() || "Anonymous";
@@ -652,13 +863,24 @@ if (createRoomBtn) {
 
     loginError.textContent = "";
     loginRequestPending = true;
+
+    try {
+      activeRoomKey = await deriveE2EEKey(room, password);
+      if (activeRoomKey) {
+        activeRoomKeyBase64 = await exportKeyToBase64(activeRoomKey);
+        persistRoomKey(room, activeRoomKeyBase64);
+      }
+    } catch (err) {
+      console.warn("Could not derive E2EE key:", err);
+    }
+
     socket.emit("createRoom", { room, password, nickname });
   });
 }
 
 
 if (joinRoomBtn) {
-  joinRoomBtn.addEventListener("click", () => {
+  joinRoomBtn.addEventListener("click", async () => {
     const room = roomInput.value.trim();
     const password = passwordInput.value;
     const nickname = nicknameInput.value.trim() || "Anonymous";
@@ -679,6 +901,17 @@ if (joinRoomBtn) {
 
     loginError.textContent = "";
     loginRequestPending = true;
+
+    try {
+      activeRoomKey = await deriveE2EEKey(room, password);
+      if (activeRoomKey) {
+        activeRoomKeyBase64 = await exportKeyToBase64(activeRoomKey);
+        persistRoomKey(room, activeRoomKeyBase64);
+      }
+    } catch (err) {
+      console.warn("Could not derive E2EE key:", err);
+    }
+
     socket.emit("joinRoom", { room, password, nickname });
   });
 }
@@ -736,6 +969,7 @@ function resolveInviteDetails(token) {
 
 function cancelInviteMode() {
   pendingInviteToken = null;
+  pendingInviteKey = null;
   if (inviteBanner) inviteBanner.style.display = "none";
   if (roomInputGroup) roomInputGroup.style.display = "block";
   if (passwordInputGroup) passwordInputGroup.style.display = "block";
@@ -1103,6 +1337,10 @@ function performLeaveRoom() {
   leaveVoiceChannel(true);
   cleanupP2PState();
   socket.emit('leaveRoom', { room: currentRoom });
+  clearPersistedRoomKey(currentRoom);
+  activeRoomKey = null;
+  activeRoomKeyBase64 = null;
+  updateE2EEUIState();
   fileAccessToken = null;
   currentInviteToken = null;
 
@@ -1276,6 +1514,10 @@ function handleExpiredRoomSession() {
   if (!currentRoom) return;
   leaveVoiceChannel(false);
   cleanupP2PState();
+  clearPersistedRoomKey(currentRoom);
+  activeRoomKey = null;
+  activeRoomKeyBase64 = null;
+  updateE2EEUIState();
   fileAccessToken = null;
   currentInviteToken = null;
   loginError.textContent = "Connection expired. Rejoin the room to continue.";
@@ -1300,7 +1542,7 @@ if (socket.connected && pendingInviteToken && !currentRoom) {
   setupInviteMode(pendingInviteToken);
 }
 
-socket.on("sessionRecovered", (data) => {
+socket.on("sessionRecovered", async (data) => {
   if (!data || data.room !== currentRoom) return;
   currentNickname = data.nickname;
   fileAccessToken = typeof data.fileAccessToken === "string" ? data.fileAccessToken : null;
@@ -1308,6 +1550,17 @@ socket.on("sessionRecovered", (data) => {
   currentRoomSpan.textContent = safeText(currentRoom).toUpperCase();
   currentUserSpan.textContent = safeText(currentNickname).toUpperCase();
   userCountSpan.textContent = data.userCount || 1;
+
+  if (!activeRoomKey) {
+    const persisted = getPersistedRoomKey(currentRoom);
+    if (persisted) {
+      try {
+        activeRoomKey = await importKeyFromBase64(persisted);
+        if (activeRoomKey) activeRoomKeyBase64 = persisted;
+      } catch (_) {}
+    }
+  }
+  updateE2EEUIState();
   addSystemMessage(">>> Connection restored.");
 });
 
@@ -1319,7 +1572,7 @@ socket.on("roomError", (msg) => {
   showError(msg);
 });
 
-socket.on("roomJoined", (data) => {
+socket.on("roomJoined", async (data) => {
   loginRequestPending = false;
   currentRoom = data.room;
   currentNickname = data.nickname;
@@ -1329,6 +1582,30 @@ socket.on("roomJoined", (data) => {
   try {
     if (currentNickname) localStorage.setItem("freegram_nickname", currentNickname);
   } catch (_) {}
+
+  // Setup E2EE key from invite key or persisted storage
+  if (!activeRoomKey && pendingInviteKey) {
+    try {
+      activeRoomKey = await importKeyFromBase64(pendingInviteKey);
+      if (activeRoomKey) {
+        activeRoomKeyBase64 = pendingInviteKey;
+        persistRoomKey(currentRoom, activeRoomKeyBase64);
+      }
+    } catch (err) {
+      console.warn("Failed to import invite key:", err);
+    }
+    pendingInviteKey = null;
+  } else if (!activeRoomKey) {
+    const persisted = getPersistedRoomKey(currentRoom);
+    if (persisted) {
+      try {
+        activeRoomKey = await importKeyFromBase64(persisted);
+        if (activeRoomKey) activeRoomKeyBase64 = persisted;
+      } catch (_) {}
+    }
+  }
+
+  updateE2EEUIState();
 
   currentRoomSpan.textContent = safeText(currentRoom).toUpperCase();
   currentUserSpan.textContent = safeText(currentNickname).toUpperCase();
@@ -1360,6 +1637,10 @@ socket.on("roomJoined", (data) => {
 socket.on("roomClosed", (data) => {
   leaveVoiceChannel(false);
   cleanupP2PState();
+  clearPersistedRoomKey(currentRoom);
+  activeRoomKey = null;
+  activeRoomKeyBase64 = null;
+  updateE2EEUIState();
   addSystemMessage(`>>> ROOM CLOSED BY ${data.closedBy}`);
   addSystemMessage(">>> ALL FILES DELETED");
   
@@ -1515,7 +1796,7 @@ if (replyPreviewCancel) {
   replyPreviewCancel.addEventListener("click", cancelReply);
 }
 
-function sendMessage() {
+async function sendMessage() {
   const msg = normalizeOutgoingMessage(chatInput.value);
   if (!msg) return;
   if (msg.length > MAX_CHAT_LENGTH) {
@@ -1523,10 +1804,41 @@ function sendMessage() {
     return;
   }
 
-  socket.emit("chatMessage", { msg, replyTo: replyingTo ? { msgId: replyingTo.msgId } : null });
+  const currentReply = replyingTo ? {
+    msgId: replyingTo.msgId,
+    nickname: replyingTo.nickname,
+    snippet: replyingTo.snippet,
+    type: replyingTo.type
+  } : null;
+
   chatInput.value = "";
   resizeChatInput();
   cancelReply();
+
+  if (activeRoomKey) {
+    try {
+      const encrypted = await encryptChatMessage({
+        text: msg,
+        replyTo: currentReply
+      });
+      if (encrypted) {
+        socket.emit("chatMessage", {
+          enc: true,
+          iv: encrypted.iv,
+          ct: encrypted.ct,
+          replyTo: currentReply ? { msgId: currentReply.msgId } : null
+        });
+        return;
+      }
+    } catch (err) {
+      console.warn("Encryption failed, falling back to plaintext:", err);
+    }
+  }
+
+  socket.emit("chatMessage", {
+    msg,
+    replyTo: currentReply ? { msgId: currentReply.msgId } : null
+  });
 }
 
 let pendingUploadMode = "server";
@@ -1743,12 +2055,36 @@ socket.on("mediaError", (msg) => {
   addSystemMessage(`>>> ${GENERIC_ERROR_MESSAGE}`);
 });
 
-socket.on("chatMessage", (data) => {
+socket.on("chatMessage", async (data) => {
   if (data.type === 'media') {
     addMediaMessage(data);
   } else if (data.type === 'p2p-offer') {
     addP2PMessage(data);
   } else {
+    if (data.enc && data.iv && data.ct) {
+      if (activeRoomKey) {
+        try {
+          const decrypted = await decryptChatMessage(data.iv, data.ct);
+          if (decrypted && typeof decrypted.text === "string") {
+            data.msg = decrypted.text;
+            if (decrypted.replyTo) {
+              data.replyTo = decrypted.replyTo;
+            }
+            data.encrypted = true;
+          } else {
+            data.msg = "[🔒 Encrypted message (Unable to decrypt)]";
+            data.decryptFailed = true;
+          }
+        } catch (err) {
+          console.warn("Failed to decrypt message:", err);
+          data.msg = "[🔒 Encrypted message (Decryption error)]";
+          data.decryptFailed = true;
+        }
+      } else {
+        data.msg = "[🔒 Encrypted message (Key unavailable)]";
+        data.decryptFailed = true;
+      }
+    }
     addTextMessage(data);
   }
 });
@@ -1793,17 +2129,23 @@ function addTextMessage(data) {
   const nickname = escapeHtml(String(data.nickname || ""));
   const time = escapeHtml(String(data.time || ""));
 
+  const lockHtml = data.encrypted
+    ? `<span class="message-e2e-lock" title="End-to-End Encrypted (AES-256-GCM)"><i class="fas fa-lock" aria-hidden="true"></i></span>`
+    : (data.decryptFailed
+       ? `<span class="message-e2e-lock lock-error" title="Could not decrypt message"><i class="fas fa-lock-open" aria-hidden="true"></i></span>`
+       : '');
+
   messageDiv.className = data.self ? "message-self" : "message-other";
   if (data.msgId) messageDiv.dataset.msgId = data.msgId;
   if (typeof data.msg === "string") messageDiv.dataset.rawMsg = encodeURIComponent(data.msg);
   messageDiv.innerHTML = `
     <div class="message-header">
       <span class="message-nickname">${nickname}</span>
-      <span class="message-time">${time}</span>
+      <span class="message-time">${time}${lockHtml}</span>
       ${buildMessageActionsHtml(data.msgId)}
     </div>
     ${buildReplyQuoteHtml(data.replyTo)}
-    <div class="message-content">${messageHtml}</div>
+    <div class="message-content${data.decryptFailed ? ' message-decrypt-failed' : ''}">${messageHtml}</div>
   `;
 
   messagesList.appendChild(messageDiv);

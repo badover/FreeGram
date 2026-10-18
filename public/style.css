@@ -1302,6 +1302,11 @@ body.image-modal-open {
     font-size: 11px;
   }
 
+  .header-right .e2ee-status-badge {
+    padding: 6px 8px;
+    font-size: 10px;
+  }
+
   .messages-container {
     padding: 14px;
   }
@@ -1404,6 +1409,77 @@ body.image-modal-open {
   color: black !important;
   border-color: var(--neon-green) !important;
   box-shadow: 0 0 18px rgba(0, 255, 136, 0.7) !important;
+}
+
+.e2ee-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-family: var(--font-tech, 'Share Tech Mono', monospace);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-secondary, #88aacc);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: none;
+  text-shadow: none;
+  user-select: none;
+  transition: all 0.2s ease;
+  cursor: default;
+}
+
+.e2ee-status-badge i {
+  font-size: 11px;
+  color: var(--text-secondary, #88aacc);
+  text-shadow: none;
+}
+
+.e2ee-status-badge.inactive {
+  background: transparent;
+  color: var(--text-secondary, #88aacc);
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: none;
+  opacity: 0.5;
+}
+
+.e2ee-status-badge.inactive i {
+  color: var(--text-secondary, #88aacc);
+  text-shadow: none;
+}
+
+.message-e2e-lock {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 5px;
+  color: var(--text-secondary, #88aacc);
+  font-size: 11px;
+  opacity: 0.7;
+  cursor: help;
+  transition: opacity 0.2s ease;
+  text-shadow: none;
+  box-shadow: none;
+}
+
+.message-e2e-lock:hover {
+  opacity: 1;
+  text-shadow: none;
+  transform: none;
+}
+
+.message-e2e-lock.lock-error {
+  color: var(--neon-red, #ff0055);
+  opacity: 0.85;
+  text-shadow: none;
+}
+
+.message-decrypt-failed {
+  font-style: italic;
+  color: var(--neon-red, #ff0055) !important;
+  opacity: 0.85;
 }
 
 .system-invite-link {

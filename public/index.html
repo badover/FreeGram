@@ -111,6 +111,7 @@
         <div class="login-footer">
           <p>SERVER DOES NOT LOG YOUR MESSAGES</p>
           <p>FULL ANONYMITY, NO DATABASES, NO METADATA</p>
+          <p><i class="fas fa-shield-halved neon-green"></i> ZERO-KNOWLEDGE END-TO-END ENCRYPTED (AES-256-GCM)</p>
         </div>
       </div>
     </div>
@@ -131,6 +132,9 @@
         <div class="header-right">
           <span class="room-display" id="currentRoom">ROOM: OFFLINE</span>
           <span class="user-display" id="currentUser">USER: ANONYMOUS</span>
+          <span class="e2ee-status-badge" id="e2eeBadge" title="End-to-End Encrypted (AES-256-GCM)">
+            <i class="fas fa-lock" aria-hidden="true"></i> <span class="e2ee-badge-text">E2EE</span>
+          </span>
           <button id="shareRoomBtn" class="leave-btn share-room-btn" type="button" aria-label="Share room invite link" title="Share room invite link">
             <i class="fas fa-link" aria-hidden="true"></i> <span class="share-btn-text">INVITE</span>
           </button>
