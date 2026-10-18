@@ -176,6 +176,8 @@ const pendingUploads = Object.create(null);
 const pendingRoomCreations = new Set();
 const fileAccessTokens = new Map();
 const disconnectGraceTimers = new Map();
+const roomInviteTokens = new Map();
+const roomToInviteToken = new Map();
 
 function getSocketRoom(socket) {
   if (!socket.room) return null;
@@ -238,6 +240,7 @@ function removeDisconnectedRoomMember(socketId, roomName, nickname) {
     setTimeout(() => {
       if (rooms[roomName] && Object.keys(rooms[roomName].users).length === 0) {
         deleteRoomFiles(roomName);
+        revokeRoomInviteToken(roomName);
         delete rooms[roomName];
       }
     }, 300000);
@@ -248,6 +251,27 @@ function revokeRoomFileAccessTokens(roomName) {
   for (const [token, access] of fileAccessTokens) {
     if (access.roomName === roomName) fileAccessTokens.delete(token);
   }
+}
+
+function revokeRoomInviteToken(roomName) {
+  const token = roomToInviteToken.get(roomName);
+  if (token) {
+    roomInviteTokens.delete(token);
+    roomToInviteToken.delete(roomName);
+  }
+}
+
+function getOrCreateRoomInviteToken(roomName) {
+  let token = roomToInviteToken.get(roomName);
+  if (!token) {
+    token = crypto.randomBytes(9).toString("base64url");
+    roomInviteTokens.set(token, { roomName, createdAt: Date.now() });
+    roomToInviteToken.set(roomName, token);
+    if (rooms[roomName]) {
+      rooms[roomName].inviteToken = token;
+    }
+  }
+  return token;
 }
 
 function sanitizeUploadName(fileName) {
@@ -350,6 +374,25 @@ app.get('/uploads/:filename', (req, res) => {
 });
 
 app.use(express.static("public"));
+
+app.get(["/join/:token", "/i/:token", "/r/:token"], (req, res, next) => {
+  const token = req.params.token;
+  if (!token || token.includes(".")) {
+    return next();
+  }
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
+
+app.get("/:token", (req, res, next) => {
+  const token = req.params.token;
+  if (!token || token.includes(".") || token === "uploads") {
+    return next();
+  }
+  if (roomInviteTokens.has(token) || /^[a-zA-Z0-9_-]{8,32}$/.test(token)) {
+    return res.sendFile(path.join(__dirname, "public", "index.html"));
+  }
+  next();
+});
 
 function sanitizeString(str, maxLen) {
   if (typeof str !== "string") return null;
@@ -674,11 +717,13 @@ io.on("connection", (socket) => {
       socket.room = roomName;
       socket.nickname = nickname;
       const fileAccessToken = issueFileAccessToken(socket);
+      const inviteToken = roomData.inviteToken || getOrCreateRoomInviteToken(roomName);
       socket.emit("sessionRecovered", {
         room: roomName,
         nickname,
         userCount: Object.keys(roomData.users).length,
-        fileAccessToken
+        fileAccessToken,
+        inviteToken
       });
     } else {
       for (const joinedRoom of socket.rooms) {
@@ -725,12 +770,14 @@ io.on("connection", (socket) => {
       const passwordHash = await argon2.hash(password, { type: argon2.argon2id });
       if (!socket.connected) return;
 
+      const inviteToken = getOrCreateRoomInviteToken(room);
       rooms[room] = {
         password: passwordHash,
         users: Object.create(null),
         voiceUsers: Object.create(null),
         createdAt: Date.now(),
-        creator: socket.id
+        creator: socket.id,
+        inviteToken
       };
 
       rooms[room].users[socket.id] = {
@@ -753,7 +800,8 @@ io.on("connection", (socket) => {
         nickname,
         userCount: 1,
         isCreator: true,
-        fileAccessToken
+        fileAccessToken,
+        inviteToken
       });
       emitVoiceParticipants(room);
     } catch (error) {
@@ -815,12 +863,14 @@ io.on("connection", (socket) => {
     socket.data.nickname = nickname;
     const fileAccessToken = issueFileAccessToken(socket);
 
+    const inviteToken = roomData.inviteToken || getOrCreateRoomInviteToken(room);
     socket.emit("roomJoined", {
       room,
       nickname,
       userCount: Object.keys(roomData.users).length,
       isCreator: roomData.creator === socket.id,
-      fileAccessToken
+      fileAccessToken,
+      inviteToken
     });
     emitVoiceParticipants(room);
 
@@ -830,6 +880,114 @@ io.on("connection", (socket) => {
       count: Object.keys(roomData.users).length
     });
 
+  });
+
+  socket.on("resolveInvite", ({ token } = {}, callback) => {
+    if (typeof callback !== "function") return;
+    if (typeof token !== "string" || !token || token.length > 64) {
+      callback({ ok: false, error: "Invalid invite token" });
+      return;
+    }
+    const invite = roomInviteTokens.get(token);
+    if (!invite) {
+      callback({ ok: false, error: "Invite link expired or invalid" });
+      return;
+    }
+    const roomName = invite.roomName;
+    const roomData = rooms[roomName];
+    if (!roomData) {
+      revokeRoomInviteToken(roomName);
+      callback({ ok: false, error: "Room no longer exists" });
+      return;
+    }
+    callback({
+      ok: true,
+      roomName,
+      userCount: Object.keys(roomData.users).length
+    });
+  });
+
+  socket.on("joinByInvite", async ({ token, nickname } = {}) => {
+    if (typeof token !== "string" || !token || token.length > 64) {
+      socket.emit("roomError", "Invalid invite token");
+      return;
+    }
+
+    const joinKey = `${clientIp(socket)}:invite`;
+    if (!joinAttemptLimiter.isAllowed(joinKey)) {
+      const remainingWait = joinAttemptLimiter.getRemainingTime(joinKey);
+      socket.emit("roomError", `Too many attempts. Try again in ${remainingWait}s`);
+      console.warn(`⚠️ Invite join rate limit: ${clientIp(socket)} blocked for ${remainingWait}s`);
+      return;
+    }
+
+    const invite = roomInviteTokens.get(token);
+    if (!invite) {
+      socket.emit("roomError", "Invite link expired or invalid");
+      return;
+    }
+
+    const roomName = invite.roomName;
+    const roomData = rooms[roomName];
+    if (!roomData) {
+      revokeRoomInviteToken(roomName);
+      socket.emit("roomError", "Room no longer exists");
+      return;
+    }
+
+    if (Object.keys(roomData.users).length >= MAX_USERS_PER_ROOM) {
+      socket.emit("roomError", `Room is full (max ${MAX_USERS_PER_ROOM} users)`);
+      return;
+    }
+
+    nickname = sanitizeString(nickname || "Anonymous", MAX_NICK_LEN) || "Anonymous";
+
+    if (socket.room && rooms[socket.room]) {
+      leaveVoice(socket);
+      delete rooms[socket.room].users[socket.id];
+      revokeFileAccessToken(socket);
+      socket.leave(socket.room);
+    }
+
+    roomData.users[socket.id] = {
+      nickname,
+      joinedAt: Date.now(),
+      isCreator: roomData.creator === socket.id
+    };
+
+    socket.join(roomName);
+    socket.room = roomName;
+    socket.nickname = nickname;
+    socket.data.room = roomName;
+    socket.data.nickname = nickname;
+    const fileAccessToken = issueFileAccessToken(socket);
+
+    socket.emit("roomJoined", {
+      room: roomName,
+      nickname,
+      userCount: Object.keys(roomData.users).length,
+      isCreator: roomData.creator === socket.id,
+      fileAccessToken,
+      inviteToken: token
+    });
+    emitVoiceParticipants(roomName);
+
+    socket.to(roomName).emit("userJoined", { nickname });
+
+    io.to(roomName).emit("updateUserCount", {
+      count: Object.keys(roomData.users).length
+    });
+  });
+
+  socket.on("getInviteLink", (_, callback) => {
+    if (typeof callback !== "function") return;
+    const membership = getSocketRoom(socket);
+    if (!membership) {
+      callback({ ok: false, error: "Not in a room" });
+      return;
+    }
+    const token = getOrCreateRoomInviteToken(membership.roomName);
+    callback({ ok: true, inviteToken: token, room: membership.roomName });
   });
 
  
@@ -859,6 +1017,7 @@ io.on("connection", (socket) => {
           setTimeout(() => {
             if (rooms[roomToDelete] && Object.keys(rooms[roomToDelete].users).length === 0) {
               deleteRoomFiles(roomToDelete);
+              revokeRoomInviteToken(roomToDelete);
               delete rooms[roomToDelete];
               console.log(`Room ${roomToDelete} deleted`);
             }
@@ -895,6 +1054,7 @@ io.on("connection", (socket) => {
 
     deleteRoomFiles(room);
     revokeRoomFileAccessTokens(room);
+    revokeRoomInviteToken(room);
     delete rooms[room];
     io.in(room).socketsLeave(room);
   });

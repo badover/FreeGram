@@ -46,6 +46,115 @@ const replyPreviewBar = document.getElementById("replyPreviewBar");
 const replyPreviewNickname = document.getElementById("replyPreviewNickname");
 const replyPreviewSnippet = document.getElementById("replyPreviewSnippet");
 const replyPreviewCancel = document.getElementById("replyPreviewCancel");
+const shareRoomBtn = document.getElementById("shareRoomBtn");
+const cyberToastContainer = document.getElementById("cyberToastContainer");
+
+const inviteBanner = document.getElementById("inviteBanner");
+const inviteRoomNameBadge = document.getElementById("inviteRoomNameBadge");
+const roomInputGroup = document.getElementById("roomInputGroup");
+const passwordInputGroup = document.getElementById("passwordInputGroup");
+const normalButtonGroup = document.getElementById("normalButtonGroup");
+const inviteButtonGroup = document.getElementById("inviteButtonGroup");
+const joinInviteBtn = document.getElementById("joinInviteBtn");
+const inviteCancelRow = document.getElementById("inviteCancelRow");
+const inviteCancelBtn = document.getElementById("inviteCancelBtn");
+
+function getInviteTokenFromUrl() {
+  const path = window.location.pathname;
+  const matchPrefixed = path.match(/^\/(?:join|i|r)\/([^\/?#]+)/i);
+  if (matchPrefixed) return matchPrefixed[1].trim();
+
+  const matchDirect = path.match(/^\/([a-zA-Z0-9_-]{8,64})\/?$/);
+  if (matchDirect && !path.includes(".")) return matchDirect[1].trim();
+
+  const urlParams = new URLSearchParams(window.location.search);
+  const queryInvite = urlParams.get("invite");
+  if (queryInvite && queryInvite.trim()) return queryInvite.trim();
+
+  const hash = window.location.hash.replace(/^#/, "");
+  const hashMatch = hash.match(/(?:invite=)?([a-zA-Z0-9_-]{8,64})/i);
+  if (hashMatch) return hashMatch[1].trim();
+
+  return null;
+}
+
+function getRoomInviteUrl(token) {
+  return `${window.location.origin}/join/${token}`;
+}
+
+function showCyberToast(message, type = "success", durationMs = 2500) {
+  let container = document.getElementById("cyberToastContainer");
+  if (!container) {
+    container = document.createElement("div");
+    container.id = "cyberToastContainer";
+    container.className = "cyber-toast-container";
+    document.body.appendChild(container);
+  }
+
+  const toast = document.createElement("div");
+  toast.className = `cyber-toast ${type}`;
+  const iconClass = type === "error" ? "fa-circle-exclamation" : "fa-circle-check";
+  toast.innerHTML = `<i class="fas ${iconClass}" aria-hidden="true"></i><span>${escapeHtml(message)}</span>`;
+  container.appendChild(toast);
+
+  setTimeout(() => {
+    toast.style.animation = "toastFadeOut 0.25s forwards";
+    setTimeout(() => toast.remove(), 250);
+  }, durationMs);
+}
+
+function copyTextToClipboard(text) {
+  return new Promise((resolve) => {
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text)
+        .then(() => resolve(true))
+        .catch(() => {
+          resolve(fallbackCopy(text));
+        });
+    } else {
+      resolve(fallbackCopy(text));
+    }
+  });
+}
+
+function fallbackCopy(text) {
+  let success = false;
+  const textArea = document.createElement("textarea");
+  textArea.value = text;
+  textArea.style.position = "fixed";
+  textArea.style.top = "0";
+  textArea.style.left = "-9999px";
+  textArea.style.width = "2em";
+  textArea.style.height = "2em";
+  textArea.style.padding = "0";
+  textArea.style.border = "none";
+  textArea.style.outline = "none";
+  textArea.style.boxShadow = "none";
+  textArea.style.background = "transparent";
+  textArea.setAttribute("readonly", "");
+  document.body.appendChild(textArea);
+
+  if (navigator.userAgent.match(/ipad|ipod|iphone/i)) {
+    const range = document.createRange();
+    range.selectNodeContents(textArea);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    textArea.setSelectionRange(0, 999999);
+  } else {
+    textArea.select();
+  }
+
+  try {
+    success = document.execCommand("copy");
+  } catch (err) {
+    console.error("Fallback copy failed:", err);
+    success = false;
+  }
+
+  document.body.removeChild(textArea);
+  return success;
+}
 
 const screenShareSupported = !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
 if (voiceScreenBtn && !screenShareSupported) {
@@ -54,6 +163,8 @@ if (voiceScreenBtn && !screenShareSupported) {
 
 let currentRoom = "";
 let currentNickname = "";
+let currentInviteToken = null;
+let pendingInviteToken = getInviteTokenFromUrl();
 let fileAccessToken = null;
 let loginRequestPending = false;
 let typingUsers = new Map();
@@ -535,6 +646,10 @@ if (createRoomBtn) {
       return;
     }
 
+    if (nickname) {
+      try { localStorage.setItem("freegram_nickname", nickname); } catch (_) {}
+    }
+
     loginError.textContent = "";
     loginRequestPending = true;
     socket.emit("createRoom", { room, password, nickname });
@@ -558,10 +673,164 @@ if (joinRoomBtn) {
       return;
     }
 
+    if (nickname) {
+      try { localStorage.setItem("freegram_nickname", nickname); } catch (_) {}
+    }
+
     loginError.textContent = "";
     loginRequestPending = true;
     socket.emit("joinRoom", { room, password, nickname });
   });
+}
+
+function setupInviteMode(token) {
+  if (!token) return;
+  pendingInviteToken = token;
+
+  if (inviteBanner) inviteBanner.style.display = "block";
+  if (roomInputGroup) roomInputGroup.style.display = "none";
+  if (passwordInputGroup) passwordInputGroup.style.display = "none";
+  if (normalButtonGroup) normalButtonGroup.style.display = "none";
+  if (inviteButtonGroup) inviteButtonGroup.style.display = "flex";
+  if (inviteCancelRow) inviteCancelRow.style.display = "block";
+
+  try {
+    const saved = localStorage.getItem("freegram_nickname");
+    if (saved && nicknameInput) {
+      nicknameInput.value = saved;
+    }
+  } catch (_) {}
+
+  if (nicknameInput) {
+    nicknameInput.placeholder = "Enter your custom nickname";
+    nicknameInput.focus();
+    if (nicknameInput.value) {
+      nicknameInput.select();
+    }
+  }
+
+  if (socket.connected) {
+    resolveInviteDetails(token);
+  } else {
+    socket.once("connect", () => resolveInviteDetails(token));
+  }
+}
+
+function resolveInviteDetails(token) {
+  socket.emit("resolveInvite", { token }, (res) => {
+    if (res && res.ok && res.roomName) {
+      if (inviteRoomNameBadge) {
+        const countInfo = typeof res.userCount === "number" ? ` (${res.userCount} online)` : "";
+        inviteRoomNameBadge.textContent = `${res.roomName.toUpperCase()}${countInfo}`;
+        inviteRoomNameBadge.className = "neon-yellow";
+      }
+    } else if (res && res.error) {
+      if (inviteRoomNameBadge) {
+        inviteRoomNameBadge.textContent = "EXPIRED OR INVALID";
+        inviteRoomNameBadge.className = "neon-red";
+      }
+      showError(res.error || "Invite link expired or invalid");
+    }
+  });
+}
+
+function cancelInviteMode() {
+  pendingInviteToken = null;
+  if (inviteBanner) inviteBanner.style.display = "none";
+  if (roomInputGroup) roomInputGroup.style.display = "block";
+  if (passwordInputGroup) passwordInputGroup.style.display = "block";
+  if (normalButtonGroup) normalButtonGroup.style.display = "flex";
+  if (inviteButtonGroup) inviteButtonGroup.style.display = "none";
+  if (inviteCancelRow) inviteCancelRow.style.display = "none";
+  if (nicknameInput) {
+    nicknameInput.placeholder = "Enter nickname";
+    nicknameInput.focus();
+  }
+}
+
+function submitInviteJoin() {
+  if (!pendingInviteToken) return;
+
+  const rawNick = nicknameInput ? nicknameInput.value.trim() : "";
+  const nickname = rawNick || `Guest_${Math.floor(1000 + Math.random() * 9000)}`;
+
+  if (rawNick) {
+    try {
+      localStorage.setItem("freegram_nickname", rawNick);
+    } catch (_) {}
+  }
+
+  loginError.textContent = "";
+  loginRequestPending = true;
+
+  socket.emit("joinByInvite", { token: pendingInviteToken, nickname });
+}
+
+if (joinInviteBtn) {
+  joinInviteBtn.addEventListener("click", submitInviteJoin);
+}
+
+if (inviteCancelBtn) {
+  inviteCancelBtn.addEventListener("click", cancelInviteMode);
+}
+
+if (nicknameInput) {
+  nicknameInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (pendingInviteToken) {
+        submitInviteJoin();
+      } else if (roomInput) {
+        roomInput.focus();
+      }
+    }
+  });
+}
+
+if (pendingInviteToken) {
+  setupInviteMode(pendingInviteToken);
+}
+
+function shareCurrentRoom() {
+  if (!currentRoom) return;
+  if (!currentInviteToken) {
+    socket.emit("getInviteLink", (res) => {
+      if (res && res.ok && res.inviteToken) {
+        currentInviteToken = res.inviteToken;
+        doCopyInviteLink();
+      } else {
+        showCyberToast("Could not generate invite link", "error");
+      }
+    });
+    return;
+  }
+  doCopyInviteLink();
+}
+
+async function doCopyInviteLink() {
+  const url = getRoomInviteUrl(currentInviteToken);
+  const ok = await copyTextToClipboard(url);
+  if (ok) {
+    if (shareRoomBtn) {
+      shareRoomBtn.classList.add("copied");
+      const btnText = shareRoomBtn.querySelector(".share-btn-text");
+      const icon = shareRoomBtn.querySelector("i");
+      if (btnText) btnText.textContent = "COPIED!";
+      if (icon) icon.className = "fas fa-check";
+      setTimeout(() => {
+        shareRoomBtn.classList.remove("copied");
+        if (btnText) btnText.textContent = "INVITE";
+        if (icon) icon.className = "fas fa-link";
+      }, 2000);
+    }
+    showCyberToast("Invite link copied: " + url, "success");
+  } else {
+    showCyberToast("Could not copy invite link", "error");
+  }
+}
+
+if (shareRoomBtn) {
+  shareRoomBtn.addEventListener("click", shareCurrentRoom);
 }
 
 
@@ -835,6 +1104,7 @@ function performLeaveRoom() {
   cleanupP2PState();
   socket.emit('leaveRoom', { room: currentRoom });
   fileAccessToken = null;
+  currentInviteToken = null;
 
   chatScreen.style.display = 'none';
   loginScreen.style.display = 'flex';
@@ -1007,6 +1277,7 @@ function handleExpiredRoomSession() {
   leaveVoiceChannel(false);
   cleanupP2PState();
   fileAccessToken = null;
+  currentInviteToken = null;
   loginError.textContent = "Connection expired. Rejoin the room to continue.";
   chatScreen.style.display = "none";
   loginScreen.style.display = "flex";
@@ -1018,13 +1289,22 @@ function handleExpiredRoomSession() {
 socket.on("connect", () => {
   if (currentRoom && !socket.recovered) {
     handleExpiredRoomSession();
+    return;
+  }
+  if (pendingInviteToken && !currentRoom) {
+    setupInviteMode(pendingInviteToken);
   }
 });
+
+if (socket.connected && pendingInviteToken && !currentRoom) {
+  setupInviteMode(pendingInviteToken);
+}
 
 socket.on("sessionRecovered", (data) => {
   if (!data || data.room !== currentRoom) return;
   currentNickname = data.nickname;
   fileAccessToken = typeof data.fileAccessToken === "string" ? data.fileAccessToken : null;
+  currentInviteToken = typeof data.inviteToken === "string" ? data.inviteToken : currentInviteToken;
   currentRoomSpan.textContent = safeText(currentRoom).toUpperCase();
   currentUserSpan.textContent = safeText(currentNickname).toUpperCase();
   userCountSpan.textContent = data.userCount || 1;
@@ -1044,6 +1324,11 @@ socket.on("roomJoined", (data) => {
   currentRoom = data.room;
   currentNickname = data.nickname;
   fileAccessToken = typeof data.fileAccessToken === "string" ? data.fileAccessToken : null;
+  currentInviteToken = typeof data.inviteToken === "string" ? data.inviteToken : null;
+
+  try {
+    if (currentNickname) localStorage.setItem("freegram_nickname", currentNickname);
+  } catch (_) {}
 
   currentRoomSpan.textContent = safeText(currentRoom).toUpperCase();
   currentUserSpan.textContent = safeText(currentNickname).toUpperCase();
@@ -1052,11 +1337,20 @@ socket.on("roomJoined", (data) => {
   loginScreen.style.display = "none";
   chatScreen.style.display = "block";
 
+  try {
+    const cleanPath = window.location.pathname.replace(/^\/(?:join|i|r)\/[a-zA-Z0-9_-]+|\/[a-zA-Z0-9_-]{8,64}$/, "") || "/";
+    window.history.replaceState({}, document.title, window.location.origin + cleanPath);
+  } catch (_) {}
+
   messagesList.innerHTML = "";
   resetVoiceStateUI();
   refreshIceServers();
 
   addSystemMessage(`>>> ROOM: ${currentRoom}`);
+  if (currentInviteToken) {
+    const inviteUrl = getRoomInviteUrl(currentInviteToken);
+    addSystemMessage(`>>> INVITE LINK: ${inviteUrl} (click to copy)`);
+  }
   
   createUploadButton();
 
@@ -1107,9 +1401,9 @@ function truncateSnippet(text, maxLen = 80) {
   return `${trimmed.slice(0, maxLen - 1).trimEnd()}…`;
 }
 
-function registerMessage(msgId, nickname, snippet, type, el) {
+function registerMessage(msgId, nickname, snippet, type, el, rawText = "") {
   if (!msgId) return;
-  messageRegistry.set(msgId, { nickname: String(nickname || ""), snippet, type, el });
+  messageRegistry.set(msgId, { nickname: String(nickname || ""), snippet, type, el, rawText });
   if (messageRegistry.size > MESSAGE_REGISTRY_LIMIT) {
     messageRegistry.delete(messageRegistry.keys().next().value);
   }
@@ -1152,10 +1446,69 @@ function buildReplyQuoteHtml(replyTo) {
   `;
 }
 
-function buildReplyButtonHtml(msgId) {
+function buildMessageActionsHtml(msgId) {
   if (!msgId) return "";
   const id = escapeHtml(String(msgId));
-  return `<button type="button" class="message-reply-btn" data-reply-to="${id}" aria-label="Reply" title="Reply"><i class="fas fa-reply"></i></button>`;
+  return `
+    <div class="message-actions">
+      <button type="button" class="message-action-btn message-copy-btn" data-copy-msg-id="${id}" aria-label="Copy message" title="Copy message"><i class="fas fa-copy"></i></button>
+      <button type="button" class="message-action-btn message-reply-btn" data-reply-to="${id}" aria-label="Reply" title="Reply"><i class="fas fa-reply"></i></button>
+    </div>
+  `;
+}
+
+function buildReplyButtonHtml(msgId) {
+  return buildMessageActionsHtml(msgId);
+}
+
+async function handleCopyMessage(btn) {
+  const msgId = btn.dataset.copyMsgId;
+  if (!msgId) return;
+
+  let textToCopy = "";
+  const entry = messageRegistry.get(msgId);
+  if (entry && entry.rawText) {
+    textToCopy = entry.rawText;
+  } else {
+    const el = findMessageElement(msgId);
+    if (el) {
+      if (el.dataset.rawMsg) {
+        try {
+          textToCopy = decodeURIComponent(el.dataset.rawMsg);
+        } catch (_) {
+          textToCopy = el.dataset.rawMsg;
+        }
+      } else {
+        const contentEl = el.querySelector(".message-content");
+        if (contentEl) {
+          textToCopy = contentEl.innerText || contentEl.textContent || "";
+        } else {
+          const link = el.querySelector(".view-link, .download-link");
+          if (link) {
+            textToCopy = link.href;
+          } else {
+            textToCopy = entry?.snippet || "";
+          }
+        }
+      }
+    }
+  }
+
+  if (!textToCopy) return;
+
+  const ok = await copyTextToClipboard(textToCopy);
+  if (ok) {
+    btn.classList.add("copied");
+    const originalHtml = btn.innerHTML;
+    btn.innerHTML = '<i class="fas fa-check"></i>';
+    showCyberToast("Message copied to clipboard!", "success");
+    setTimeout(() => {
+      btn.classList.remove("copied");
+      btn.innerHTML = originalHtml;
+    }, 1500);
+  } else {
+    showCyberToast("Could not copy message", "error");
+  }
 }
 
 if (replyPreviewCancel) {
@@ -1442,18 +1795,19 @@ function addTextMessage(data) {
 
   messageDiv.className = data.self ? "message-self" : "message-other";
   if (data.msgId) messageDiv.dataset.msgId = data.msgId;
+  if (typeof data.msg === "string") messageDiv.dataset.rawMsg = encodeURIComponent(data.msg);
   messageDiv.innerHTML = `
     <div class="message-header">
       <span class="message-nickname">${nickname}</span>
       <span class="message-time">${time}</span>
-      ${buildReplyButtonHtml(data.msgId)}
+      ${buildMessageActionsHtml(data.msgId)}
     </div>
     ${buildReplyQuoteHtml(data.replyTo)}
     <div class="message-content">${messageHtml}</div>
   `;
 
   messagesList.appendChild(messageDiv);
-  registerMessage(data.msgId, data.nickname, truncateSnippet(data.msg), "text", messageDiv);
+  registerMessage(data.msgId, data.nickname, truncateSnippet(data.msg), "text", messageDiv, data.msg);
   scrollToBottom();
 }
 
@@ -2053,7 +2407,13 @@ function addSystemMessage(text) {
 
   const inner = document.createElement("div");
   inner.className = "system-text";
-  inner.textContent = text;
+
+  const inviteMatch = String(text || "").match(/(>>> INVITE LINK:\s*)(https?:\/\/[^\s]+)(.*)/);
+  if (inviteMatch) {
+    inner.innerHTML = `${escapeHtml(inviteMatch[1])}<span class="system-invite-link" data-url="${escapeHtml(inviteMatch[2])}" title="Click to copy invite link">${escapeHtml(inviteMatch[2])}</span>${escapeHtml(inviteMatch[3])}`;
+  } else {
+    inner.textContent = text;
+  }
 
   systemDiv.appendChild(inner);
   messagesList.appendChild(systemDiv);
@@ -3546,6 +3906,23 @@ function hasActiveTextSelection() {
 }
 
 messagesList.addEventListener("click", (e) => {
+  const copyBtn = e.target.closest(".message-copy-btn");
+  if (copyBtn) {
+    e.stopPropagation();
+    handleCopyMessage(copyBtn);
+    return;
+  }
+
+  const systemInviteLink = e.target.closest(".system-invite-link");
+  if (systemInviteLink) {
+    e.stopPropagation();
+    const url = systemInviteLink.dataset.url || systemInviteLink.textContent;
+    copyTextToClipboard(url).then((ok) => {
+      if (ok) showCyberToast("Invite link copied to clipboard!", "success");
+    });
+    return;
+  }
+
   const replyBtn = e.target.closest(".message-reply-btn");
   if (replyBtn) {
     startReply(replyBtn.dataset.replyTo);
@@ -3584,13 +3961,38 @@ messagesList.addEventListener("click", (e) => {
 });
 
 window.addEventListener("DOMContentLoaded", () => {
-  nicknameInput.value = "";
-  roomInput.value = "";
-  passwordInput.value = "";
+  try {
+    const savedNickname = localStorage.getItem("freegram_nickname");
+    if (savedNickname && nicknameInput) {
+      nicknameInput.value = savedNickname;
+    } else if (nicknameInput) {
+      nicknameInput.value = "";
+    }
+  } catch (_) {
+    if (nicknameInput) nicknameInput.value = "";
+  }
+
+  if (nicknameInput) {
+    nicknameInput.addEventListener("input", () => {
+      try {
+        const val = nicknameInput.value.trim();
+        if (val) localStorage.setItem("freegram_nickname", val);
+      } catch (_) {}
+    });
+  }
+
+  if (roomInput) roomInput.value = "";
+  if (passwordInput) passwordInput.value = "";
   resetVoiceStateUI();
   resizeChatInput();
   
-  nicknameInput.focus();
+  if (pendingInviteToken) {
+    setupInviteMode(pendingInviteToken);
+  } else if (nicknameInput && nicknameInput.value) {
+    roomInput && roomInput.focus();
+  } else if (nicknameInput) {
+    nicknameInput.focus();
+  }
 });
 
 window.addEventListener("beforeunload", () => {

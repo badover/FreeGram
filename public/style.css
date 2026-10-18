@@ -281,6 +281,75 @@ body {
   display: none;
 }
 
+.invite-banner {
+  background: rgba(0, 243, 255, 0.08);
+  border: 1px solid var(--neon-blue);
+  border-radius: 8px;
+  padding: 14px 18px;
+  margin-bottom: 22px;
+  box-shadow: 0 0 20px rgba(0, 243, 255, 0.2);
+  backdrop-filter: blur(8px);
+  animation: bannerFadeIn 0.3s ease-out;
+}
+
+@keyframes bannerFadeIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.invite-banner-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-tech);
+  font-size: 13px;
+  letter-spacing: 1.5px;
+  color: var(--neon-blue);
+  margin-bottom: 8px;
+}
+
+.invite-banner-room {
+  font-size: 16px;
+  font-weight: bold;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.invite-label {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.invite-banner-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  margin: 0;
+}
+
+.invite-cancel-row {
+  text-align: center;
+  margin: 12px 0 16px;
+}
+
+.invite-cancel-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 6px 12px;
+  transition: color 0.2s;
+}
+
+.invite-cancel-btn:hover {
+  color: var(--neon-yellow);
+}
+
 @keyframes errorFlash {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
@@ -488,8 +557,14 @@ body {
   color: var(--neon-green);
 }
 
-.message-reply-btn {
+.message-actions {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.message-action-btn {
   background: transparent;
   border: 1px solid rgba(0, 243, 255, 0.35);
   color: var(--text-secondary);
@@ -502,15 +577,32 @@ body {
   justify-content: center;
   cursor: pointer;
   font-size: 13px;
-  opacity: 0.55;
-  transition: opacity 0.2s, color 0.2s, border-color 0.2s;
+  opacity: 0.65;
+  transition: all 0.2s ease;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
-.message-reply-btn:hover,
-.message-reply-btn:focus-visible {
+.message-action-btn:hover,
+.message-action-btn:focus-visible,
+.message-action-btn:active {
   opacity: 1;
   color: var(--neon-blue);
   border-color: var(--neon-blue);
+  box-shadow: 0 0 8px rgba(0, 243, 255, 0.35);
+}
+
+.message-action-btn.copied {
+  color: var(--neon-green) !important;
+  border-color: var(--neon-green) !important;
+  box-shadow: 0 0 12px rgba(0, 255, 136, 0.6) !important;
+  opacity: 1 !important;
+  transform: scale(1.1);
+}
+
+.message-reply-btn {
+  margin-left: 0;
 }
 
 .message-reply-quote {
@@ -1195,9 +1287,19 @@ body.image-modal-open {
 
   .header-right {
     width: 100%;
-    flex-direction: column;
-    gap: 6px;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
     font-size: 12px;
+  }
+
+  .header-right .leave-btn {
+    margin-left: 0;
+    flex: 1 1 auto;
+    justify-content: center;
+    padding: 8px 10px;
+    font-size: 11px;
   }
 
   .messages-container {
@@ -1281,6 +1383,100 @@ body.image-modal-open {
   background: linear-gradient(45deg, #ff0055, var(--neon-red));
   transform: scale(1.05);
   box-shadow: 0 0 15px rgba(255, 0, 85, 0.5);
+}
+
+.share-room-btn {
+  background: linear-gradient(45deg, rgba(0, 243, 255, 0.18), rgba(0, 255, 136, 0.18));
+  color: var(--neon-blue);
+  border: 1px solid var(--neon-blue);
+  margin-left: 0;
+}
+
+.share-room-btn:hover {
+  background: linear-gradient(45deg, var(--neon-blue), var(--neon-green));
+  color: black;
+  transform: scale(1.05);
+  box-shadow: 0 0 15px rgba(0, 243, 255, 0.5);
+}
+
+.share-room-btn.copied {
+  background: var(--neon-green) !important;
+  color: black !important;
+  border-color: var(--neon-green) !important;
+  box-shadow: 0 0 18px rgba(0, 255, 136, 0.7) !important;
+}
+
+.system-invite-link {
+  color: var(--neon-yellow);
+  text-decoration: underline;
+  cursor: pointer;
+  word-break: break-all;
+  transition: color 0.2s;
+}
+
+.system-invite-link:hover {
+  color: var(--neon-green);
+}
+
+.cyber-toast-container {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 99999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+  max-width: 90vw;
+  width: max-content;
+}
+
+.cyber-toast {
+  background: rgba(5, 5, 15, 0.95);
+  border: 1px solid var(--neon-blue);
+  color: var(--text-primary);
+  padding: 10px 18px;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  box-shadow: 0 4px 20px rgba(0, 243, 255, 0.35);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  animation: toastFadeIn 0.25s ease-out;
+  pointer-events: auto;
+  word-break: break-all;
+}
+
+.cyber-toast.success {
+  border-color: var(--neon-green);
+  box-shadow: 0 4px 20px rgba(0, 255, 136, 0.4);
+}
+
+.cyber-toast.success i {
+  color: var(--neon-green);
+}
+
+.cyber-toast.error {
+  border-color: var(--neon-red);
+  box-shadow: 0 4px 20px rgba(255, 0, 85, 0.4);
+}
+
+.cyber-toast.error i {
+  color: var(--neon-red);
+}
+
+@keyframes toastFadeIn {
+  from { opacity: 0; transform: translateY(12px) scale(0.95); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes toastFadeOut {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(-8px) scale(0.95); }
 }
 
 

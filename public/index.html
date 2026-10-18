@@ -4,8 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Free Gram</title>
-  <link rel="icon" href="favicon.ico" type="image/x-icon">
-  <link rel="stylesheet" href="style.css">
+  <base href="/">
+  <link rel="icon" href="/favicon.ico" type="image/x-icon">
+  <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700&family=Share+Tech+Mono&family=Jura:wght@400;500;700&display=swap');
@@ -52,24 +53,36 @@
       </div>
 
       <div class="login-form">
+        <div id="inviteBanner" class="invite-banner" style="display:none;">
+          <div class="invite-banner-header">
+            <i class="fas fa-shield-halved neon-green" aria-hidden="true"></i>
+            <span>ROOM INVITATION</span>
+          </div>
+          <div class="invite-banner-room">
+            <span class="invite-label">ROOM:</span>
+            <span id="inviteRoomNameBadge" class="neon-yellow">LOADING...</span>
+          </div>
+          <p class="invite-banner-desc">Enter your nickname below to join this room without password</p>
+        </div>
+
         <div class="asdasd">
           <div class="input-group">
-            <label class="neon-label">NICKNAME:</label>
-            <input id="nickname" placeholder="Enter nickname" class="cyber-input">
+            <label class="neon-label" id="nicknameLabel">NICKNAME:</label>
+            <input id="nickname" placeholder="Enter nickname" class="cyber-input" autocomplete="nickname">
           </div>
           
-          <div class="input-group">
+          <div class="input-group" id="roomInputGroup">
             <label class="neon-label">ROOM NAME:</label>
             <input id="room" placeholder="Enter room name" class="cyber-input">
           </div>
           
-          <div class="input-group">
+          <div class="input-group" id="passwordInputGroup">
             <label class="neon-label">PASSWORD:</label>
             <input id="password" type="password" placeholder="●●●●●●●●●●●●●●●●●●●" class="cyber-input">
           </div>
         </div>
       
-        <div class="button-group">
+        <div class="button-group" id="normalButtonGroup">
           <button id="createRoom" class="cyber-btn cyber-btn-primary">
             <span class="btn-text">CREATE ROOM</span>
             <span class="btn-glow"></span>
@@ -77,6 +90,19 @@
           <button id="joinRoom" class="cyber-btn cyber-btn-secondary">
             <span class="btn-text">JOIN EXISTING</span>
             <span class="btn-glow"></span>
+          </button>
+        </div>
+
+        <div class="button-group" id="inviteButtonGroup" style="display:none;">
+          <button id="joinInviteBtn" class="cyber-btn cyber-btn-primary" type="button">
+            <span class="btn-text"><i class="fas fa-door-open"></i> JOIN ROOM</span>
+            <span class="btn-glow"></span>
+          </button>
+        </div>
+
+        <div id="inviteCancelRow" class="invite-cancel-row" style="display:none;">
+          <button id="inviteCancelBtn" type="button" class="invite-cancel-btn">
+            Or create a room / join manually
           </button>
         </div>
 
@@ -105,6 +131,9 @@
         <div class="header-right">
           <span class="room-display" id="currentRoom">ROOM: OFFLINE</span>
           <span class="user-display" id="currentUser">USER: ANONYMOUS</span>
+          <button id="shareRoomBtn" class="leave-btn share-room-btn" type="button" aria-label="Share room invite link" title="Share room invite link">
+            <i class="fas fa-link" aria-hidden="true"></i> <span class="share-btn-text">INVITE</span>
+          </button>
           <button id="chatThemeSettingsBtn" class="leave-btn theme-open-btn" type="button" aria-label="Open themes">
             <i class="fas fa-palette" aria-hidden="true"></i> THEMES
           </button>
@@ -304,7 +333,9 @@
     </div>
   </div>
 
+  <div id="cyberToastContainer" class="cyber-toast-container" aria-live="polite"></div>
+
   <script src="/socket.io/socket.io.js"></script>
-  <script src="client.js"></script>
+  <script src="/client.js"></script>
 </body>
 </html>
